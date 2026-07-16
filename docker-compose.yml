@@ -1,0 +1,26 @@
+version: '3.8'
+services:
+  db:
+    image: mysql:8.0
+    container_name: finqueue_db
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: root_password
+      MYSQL_DATABASE: finqueue
+      MYSQL_USER: finqueue_user
+      MYSQL_PASSWORD: finqueue_pass
+    ports:
+      - "3306:3306"
+    volumes:
+      - db_data:/var/lib/mysql
+      - ./docker/mysql-init:/docker-entrypoint-initdb.d:ro
+
+  redis:
+    image: redis:7
+    container_name: finqueue_redis
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+
+volumes:
+  db_data:
