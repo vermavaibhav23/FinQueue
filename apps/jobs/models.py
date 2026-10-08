@@ -35,6 +35,7 @@ class Job(models.Model):
         blank=True,
         related_name='follow_up_jobs',
     )
+    source_event = models.CharField(max_length=64, null=True, blank=True)
     job_type = models.CharField(max_length=32, choices=JobType.choices)
     priority = models.CharField(max_length=16, choices=Priority.choices)
     status = models.CharField(
@@ -61,8 +62,8 @@ class Job(models.Model):
         ]
         constraints = [
             models.UniqueConstraint(
-                fields=('source_job', 'job_type'),
-                name='unique_follow_up_type_per_source_job',
+                fields=('source_job', 'job_type', 'source_event'),
+                name='unique_follow_up_per_source_event',
             ),
         ]
 
