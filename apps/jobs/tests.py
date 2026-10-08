@@ -24,6 +24,11 @@ class JobSubmitSerializerTests(TestCase):
                 'payload': {
                     'transaction_id': 'txn-1001',
                     'amount': '1000.00',
+                    'webhook_url': 'https://merchant.example/webhooks',
+                    'notification': {
+                        'channel': 'email',
+                        'recipient': 'customer@example.com',
+                    },
                 },
             },
             context={'request': self.request},
@@ -34,6 +39,20 @@ class JobSubmitSerializerTests(TestCase):
 
         self.assertEqual(job.priority, Job.Priority.HIGH)
         self.assertEqual(job.user, self.user)
+
+    def test_refund_requires_follow_up_routing_details(self):
+        serializer = JobSubmitSerializer(
+            data={
+                'job_type': Job.JobType.REFUND_PROCESSING,
+                'payload': {
+                    'transaction_id': 'txn-1001',
+                    'amount': '1000.00',
+                },
+            },
+            context={'request': self.request},
+        )
+
+        self.assertFalse(serializer.is_valid())
 
     def test_webhook_is_forced_to_medium_priority(self):
         serializer = JobSubmitSerializer(
