@@ -97,17 +97,16 @@ valid until it expires.
 
 ## Jobs
 
-Valid job types are:
+Valid job types and server-assigned priorities are:
 
-- `process_payment`
-- `fraud_check`
-- `send_notification`
+- `refund_processing` -> high
+- `webhook_delivery` -> medium
+- `send_notification` -> low
 
-Valid priorities are `high`, `medium`, and `low`. Fraud checks are always forced
-to high priority, notifications to low priority, and payments default to medium
-when priority is omitted.
+The client does **not** choose priority. If a `priority` field is supplied, it
+is ignored because priority is a server-side business rule.
 
-### Submit a payment job
+### Submit a refund-processing job
 
 ```http
 POST {{base_url}}/jobs/submit/
@@ -117,35 +116,35 @@ Content-Type: application/json
 
 ```json
 {
-  "job_type": "process_payment",
-  "priority": "medium",
+  "job_type": "refund_processing",
   "payload": {
+    "transaction_id": "txn-1001",
     "amount": "1000.00",
-    "merchant": "Demo Store",
-    "currency": "INR",
-    "device_id": "device-123",
-    "location": "Chennai"
+    "currency": "INR"
   }
 }
 ```
 
-Successful response (`201 Created`):
+Successful response (`202 Accepted`):
 
 ```json
 {
   "id": "12f18c85-b610-4bf6-9fd9-1b5a9c645e78",
-  "job_type": "process_payment",
-  "priority": "medium",
+  "job_type": "refund_processing",
+  "priority": "high",
   "status": "pending",
-  "queue_score": 2.1770000000,
-  "created_at": "2026-07-06T10:00:00Z"
+  "created_at": "2026-10-08T10:00:00Z"
 }
 ```
 
-The queue score is illustrative and varies with creation time. Submission is
-limited to 10 jobs per user per 60 seconds by default.
+The API has accepted and queued the work; completion happens later in the
+background worker. Submission is limited to 10 jobs per user per 60 seconds by
+default.
 
-### Submit a fraud-check job
+### Submit a webhook-delivery job
+
+A webhook is system-to-system communication. The destination is another backend,
+not a human recipient.
 
 ```http
 POST {{base_url}}/jobs/submit/
@@ -155,17 +154,22 @@ Content-Type: application/json
 
 ```json
 {
-  "job_type": "fraud_check",
+  "job_type": "webhook_delivery",
   "payload": {
-    "amount": "75000.00",
-    "merchant": "Demo Store",
-    "device_id": "new-device",
-    "location": "Chennai"
+    "url": "https://merchant.example/webhooks",
+    "event": "refund.completed",
+    "data": {
+      "transaction_id": "txn-1001",
+      "refund_id": "refund-123",
+      "amount": "1000.00"
+    }
   }
 }
 ```
 
 ### Submit a notification job
+
+A notification is system-to-human communication such as email, SMS, or push.
 
 ```http
 POST {{base_url}}/jobs/submit/
@@ -177,13 +181,26 @@ Content-Type: application/json
 {
   "job_type": "send_notification",
   "payload": {
-    "status": "SUCCESS",
-    "amount": "1000.00",
-    "merchant": "Demo Store",
-    "transaction_id": "demo-transaction"
+    "channel": "email",
+    "recipient": "customer@example.com",
+    "message": "Your refund of Rs.1000 has been processed."
   }
 }
 ```
+
+### Simulate a temporary provider failure
+
+Any valid handler payload can include:
+
+```json
+{
+  "simulate_failure": true
+}
+```
+
+For example, a failing webhook job raises a simulated temporary 5xx error. The
+worker retries it with exponential backoff and eventually moves it to the DLQ if
+all attempts fail.
 
 ### List the current user's jobs
 
@@ -196,8 +213,8 @@ Optional filters:
 
 ```text
 /jobs/?status=pending
-/jobs/?job_type=process_payment
-/jobs/?status=completed&job_type=fraud_check
+/jobs/?job_type=refund_processing
+/jobs/?status=completed&job_type=webhook_delivery
 ```
 
 The current configuration does not enable pagination, so the response is a JSON
@@ -210,31 +227,32 @@ GET {{base_url}}/jobs/{{job_id}}/
 Authorization: Bearer {{access_token}}
 ```
 
-Example response:
+Example completed refund response:
 
 ```json
 {
   "id": "12f18c85-b610-4bf6-9fd9-1b5a9c645e78",
-  "job_type": "process_payment",
-  "priority": "medium",
+  "job_type": "refund_processing",
+  "priority": "high",
   "status": "completed",
   "payload": {
+    "transaction_id": "txn-1001",
     "amount": "1000.00",
-    "merchant": "Demo Store"
+    "currency": "INR"
   },
   "retry_count": 0,
   "result": {
-    "transaction_id": "33661c14-c3f7-4a72-8943-a317f6808423",
-    "status": "SUCCESS",
+    "refund_id": "refund-12f18c85",
+    "transaction_id": "txn-1001",
+    "status": "REFUNDED",
     "amount": "1000.00",
-    "merchant": "Demo Store",
     "currency": "INR"
   },
   "failure_reason": null,
-  "created_at": "2026-07-06T10:00:00Z",
-  "updated_at": "2026-07-06T10:00:02Z",
-  "started_at": "2026-07-06T10:00:00Z",
-  "completed_at": "2026-07-06T10:00:02Z"
+  "created_at": "2026-10-08T10:00:00Z",
+  "updated_at": "2026-10-08T10:00:01Z",
+  "started_at": "2026-10-08T10:00:00Z",
+  "completed_at": "2026-10-08T10:00:01Z"
 }
 ```
 
@@ -258,13 +276,13 @@ python .\worker.py
 The worker:
 
 1. Promotes due retry jobs into the main Redis queue.
-2. Pops one job with the lowest priority score.
-3. Marks it as running and executes its handler.
-4. Marks success as completed.
+2. Pops one job with the lowest priority score (high before medium before low).
+3. Marks it as running and dispatches the correct handler.
+4. Marks successful work as completed.
 5. On an exception, schedules retries after 2, 4, and 8 seconds.
 6. Moves the job to the dead-letter queue after the final failed attempt.
 
-The payment handler waits two seconds and simulates an 80% success rate.
+Provider calls are simulated so the project remains self-contained.
 
 ## Dead-letter queue
 
@@ -320,12 +338,16 @@ Authorization: Bearer {{access_token}}
 {
   "job_types": [
     {
-      "job_type": "fraud_check",
+      "job_type": "refund_processing",
       "total": 2
     },
     {
-      "job_type": "process_payment",
-      "total": 3
+      "job_type": "webhook_delivery",
+      "total": 2
+    },
+    {
+      "job_type": "send_notification",
+      "total": 1
     }
   ]
 }
