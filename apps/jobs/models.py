@@ -28,6 +28,13 @@ class Job(models.Model):
         on_delete=models.CASCADE,
         related_name='jobs',
     )
+    source_job = models.ForeignKey(
+        'self',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='follow_up_jobs',
+    )
     job_type = models.CharField(max_length=32, choices=JobType.choices)
     priority = models.CharField(max_length=16, choices=Priority.choices)
     status = models.CharField(
@@ -51,6 +58,12 @@ class Job(models.Model):
             models.Index(fields=('user', 'status')),
             models.Index(fields=('job_type', 'status')),
             models.Index(fields=('priority', 'created_at')),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=('source_job', 'job_type'),
+                name='unique_follow_up_type_per_source_job',
+            ),
         ]
 
     def __str__(self):
