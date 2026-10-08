@@ -109,9 +109,11 @@ When a refund exhausts all retries and becomes `dead`:
 The refund status is never rolled back because a webhook or notification later
 fails.
 
-Follow-up jobs store a `source_job` reference to the refund that created them.
-A database uniqueness constraint allows at most one webhook and one notification
-follow-up per source refund, making follow-up creation idempotent.
+Follow-up jobs store both `source_job` and `source_event` (for example,
+`refund.completed` or `refund.failed`). A database uniqueness constraint
+allows at most one webhook and one notification per source event, making
+follow-up creation idempotent while still allowing a requeued failed refund to
+later emit a separate success event.
 
 ## Demo routing data
 
