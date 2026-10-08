@@ -17,6 +17,7 @@ It demonstrates:
 - Simulated webhook delivery and user notifications
 - Per-user operational metrics
 - Submission rate limiting
+- Merchant API idempotency using `Idempotency-Key` + request hash
 
 ## Job types and priority policy
 
@@ -29,6 +30,22 @@ It demonstrates:
 Priority is derived by the server from `job_type`; clients cannot escalate
 their own work by sending a higher priority.
 
+## Idempotency currently implemented
+
+FinQueue currently protects duplicates at two layers:
+
+1. **Merchant/API submission idempotency** — every external job submission must
+   include an `Idempotency-Key`. FinQueue stores `user + idempotency_key +
+   request_hash + job` in a separate `idempotency_requests` table. The same
+   key and same payload return the existing job; the same key with a different
+   payload returns `409 Conflict`.
+2. **Follow-up job creation idempotency** — internally generated webhook and
+   notification jobs are protected by
+   `UNIQUE(source_job, job_type, source_event)`.
+
+External-delivery deduplication after a worker crashes mid-delivery is intentionally
+left out of this educational version for now.
+
 ## Main asynchronous flow
 
 The normal flow starts with **one refund job**. The merchant does not need to
@@ -38,6 +55,7 @@ submit webhook and notification jobs separately.
 Merchant/API client
         |
         | POST /jobs/submit/
+        | Idempotency-Key: <merchant-generated-key>
         v
 refund_processing (HIGH)
         |
@@ -238,5 +256,5 @@ python .\manage.py test --settings=finqueue.test_settings
 FinQueue is an educational simulation. Its worker processes one job at a time
 and external providers are simulated. A production deployment would normally
 add multiple workers, hard execution timeouts, atomic reservation/outbox
-patterns, request idempotency, webhook signatures, real provider integrations,
-and richer merchant/customer models.
+patterns, external-delivery deduplication, webhook signatures, real provider
+integrations, and richer merchant/customer models.
