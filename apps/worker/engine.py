@@ -9,6 +9,7 @@ from apps.dlq.services import move_to_dead_letter_queue
 from apps.jobs.models import Job
 from apps.jobs.services import (
     calculate_retry_delay,
+    create_refund_follow_up_jobs,
     promote_due_retries,
     schedule_retry,
 )
@@ -91,6 +92,7 @@ class WorkerEngine:
             )
         )
         logger.info('Completed job %s.', job.id)
+        self._enqueue_terminal_follow_ups(job)
 
     def mark_failed(self, job, failure_reason):
         if job.retry_count < settings.FINQUEUE_MAX_RETRIES:
@@ -124,4 +126,29 @@ class WorkerEngine:
             dlq_entry.id,
             job.retry_count,
             failure_reason,
+        )
+        self._enqueue_terminal_follow_ups(job)
+
+    def _enqueue_terminal_follow_ups(self, job):
+        if job.job_type != Job.JobType.REFUND_PROCESSING:
+            return
+
+        try:
+            follow_up_jobs = create_refund_follow_up_jobs(
+                job,
+                redis_client=self.redis_client,
+            )
+        except Exception:
+            # The refund has already reached a terminal state. A failure while
+            # creating side-effect jobs must not roll the refund back.
+            logger.exception(
+                'Could not create follow-up jobs for refund job %s.',
+                job.id,
+            )
+            return
+
+        logger.info(
+            'Created/queued %s follow-up jobs for refund job %s.',
+            len(follow_up_jobs),
+            job.id,
         )
