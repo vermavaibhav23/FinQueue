@@ -156,7 +156,8 @@ webhook_delivery    priority=medium    event=refund.completed
 send_notification   priority=low       success message
 ```
 
-Both follow-up jobs have `source_job` set to the original refund job.
+Both follow-up jobs have `source_job` set to the original refund job and
+`source_event` set to `refund.completed`.
 
 Example generated webhook payload:
 
@@ -197,8 +198,8 @@ send_notification   priority=low       failure message
 
 The failed webhook contains the final `failure_reason`.
 
-Follow-up creation is idempotent: at most one webhook and one notification job
-are created for each source refund.
+Follow-up creation is idempotent per terminal event: at most one webhook and
+one notification job are created for each `source_job + source_event` pair.
 
 ## Direct webhook/notification submission
 
@@ -285,7 +286,8 @@ GET {{base_url}}/jobs/{{job_id}}/
 Authorization: Bearer {{access_token}}
 ```
 
-Follow-up jobs include the original refund UUID in `source_job`.
+Follow-up jobs include the original refund UUID in `source_job` and the
+triggering terminal event in `source_event`.
 
 Example completed refund:
 
