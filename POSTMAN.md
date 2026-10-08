@@ -97,16 +97,19 @@ valid until it expires.
 
 ## Jobs
 
-Valid job types and server-assigned priorities are:
+Server-assigned priorities are:
 
 - `refund_processing` -> high
 - `webhook_delivery` -> medium
 - `send_notification` -> low
 
-The client does **not** choose priority. If a `priority` field is supplied, it
-is ignored because priority is a server-side business rule.
+The client does not choose priority.
 
-### Submit a refund-processing job
+## Normal flow: submit only the refund job
+
+The normal project flow starts with one `refund_processing` request. When it
+reaches `completed` or `dead`, FinQueue automatically creates the appropriate
+webhook and notification jobs.
 
 ```http
 POST {{base_url}}/jobs/submit/
@@ -120,7 +123,12 @@ Content-Type: application/json
   "payload": {
     "transaction_id": "txn-1001",
     "amount": "1000.00",
-    "currency": "INR"
+    "currency": "INR",
+    "webhook_url": "https://merchant.example/webhooks",
+    "notification": {
+      "channel": "email",
+      "recipient": "customer@example.com"
+    }
   }
 }
 ```
@@ -137,20 +145,67 @@ Successful response (`202 Accepted`):
 }
 ```
 
-The API has accepted and queued the work; completion happens later in the
-background worker. Submission is limited to 10 jobs per user per 60 seconds by
-default.
+The API has accepted the job; the worker will complete it later.
 
-### Submit a webhook-delivery job
+### On refund success
 
-A webhook is system-to-system communication. The destination is another backend,
-not a human recipient.
+The refund becomes `completed` and FinQueue internally creates:
 
-```http
-POST {{base_url}}/jobs/submit/
-Authorization: Bearer {{access_token}}
-Content-Type: application/json
+```text
+webhook_delivery    priority=medium    event=refund.completed
+send_notification   priority=low       success message
 ```
+
+Both follow-up jobs have `source_job` set to the original refund job.
+
+Example generated webhook payload:
+
+```json
+{
+  "url": "https://merchant.example/webhooks",
+  "event": "refund.completed",
+  "data": {
+    "source_job_id": "12f18c85-b610-4bf6-9fd9-1b5a9c645e78",
+    "transaction_id": "txn-1001",
+    "refund_id": "refund-12f18c85",
+    "amount": "1000.00",
+    "currency": "INR",
+    "status": "completed"
+  }
+}
+```
+
+Example generated notification payload:
+
+```json
+{
+  "channel": "email",
+  "recipient": "customer@example.com",
+  "message": "Your refund of 1000.00 INR has been processed."
+}
+```
+
+### On terminal refund failure
+
+Temporary failures are retried after 2, 4, and 8 seconds. After retries are
+exhausted, the refund becomes `dead` and FinQueue internally creates:
+
+```text
+webhook_delivery    priority=medium    event=refund.failed
+send_notification   priority=low       failure message
+```
+
+The failed webhook contains the final `failure_reason`.
+
+Follow-up creation is idempotent: at most one webhook and one notification job
+are created for each source refund.
+
+## Direct webhook/notification submission
+
+The API still accepts these job types directly for isolated testing, but the
+normal business flow creates them automatically from a terminal refund.
+
+### Webhook test
 
 ```json
 {
@@ -159,23 +214,13 @@ Content-Type: application/json
     "url": "https://merchant.example/webhooks",
     "event": "refund.completed",
     "data": {
-      "transaction_id": "txn-1001",
-      "refund_id": "refund-123",
-      "amount": "1000.00"
+      "refund_id": "refund-123"
     }
   }
 }
 ```
 
-### Submit a notification job
-
-A notification is system-to-human communication such as email, SMS, or push.
-
-```http
-POST {{base_url}}/jobs/submit/
-Authorization: Bearer {{access_token}}
-Content-Type: application/json
-```
+### Notification test
 
 ```json
 {
@@ -183,26 +228,39 @@ Content-Type: application/json
   "payload": {
     "channel": "email",
     "recipient": "customer@example.com",
-    "message": "Your refund of Rs.1000 has been processed."
+    "message": "Your refund has been processed."
   }
 }
 ```
 
-### Simulate a temporary provider failure
+## Simulate provider failure
 
-Any valid handler payload can include:
+Add `simulate_failure: true` to a valid handler payload to exercise retry and
+DLQ behavior.
+
+For example, to force the refund itself to fail on every attempt:
 
 ```json
 {
-  "simulate_failure": true
+  "job_type": "refund_processing",
+  "payload": {
+    "transaction_id": "txn-1001",
+    "amount": "1000.00",
+    "currency": "INR",
+    "webhook_url": "https://merchant.example/webhooks",
+    "notification": {
+      "channel": "email",
+      "recipient": "customer@example.com"
+    },
+    "simulate_failure": true
+  }
 }
 ```
 
-For example, a failing webhook job raises a simulated temporary 5xx error. The
-worker retries it with exponential backoff and eventually moves it to the DLQ if
-all attempts fail.
+After the final retry fails, the refund becomes `dead`, then its
+`refund.failed` webhook and failure notification are queued.
 
-### List the current user's jobs
+## List jobs
 
 ```http
 GET {{base_url}}/jobs/
@@ -220,25 +278,33 @@ Optional filters:
 The current configuration does not enable pagination, so the response is a JSON
 array.
 
-### Retrieve a job
+## Retrieve a job
 
 ```http
 GET {{base_url}}/jobs/{{job_id}}/
 Authorization: Bearer {{access_token}}
 ```
 
-Example completed refund response:
+Follow-up jobs include the original refund UUID in `source_job`.
+
+Example completed refund:
 
 ```json
 {
   "id": "12f18c85-b610-4bf6-9fd9-1b5a9c645e78",
+  "source_job": null,
   "job_type": "refund_processing",
   "priority": "high",
   "status": "completed",
   "payload": {
     "transaction_id": "txn-1001",
     "amount": "1000.00",
-    "currency": "INR"
+    "currency": "INR",
+    "webhook_url": "https://merchant.example/webhooks",
+    "notification": {
+      "channel": "email",
+      "recipient": "customer@example.com"
+    }
   },
   "retry_count": 0,
   "result": {
@@ -248,15 +314,11 @@ Example completed refund response:
     "amount": "1000.00",
     "currency": "INR"
   },
-  "failure_reason": null,
-  "created_at": "2026-10-08T10:00:00Z",
-  "updated_at": "2026-10-08T10:00:01Z",
-  "started_at": "2026-10-08T10:00:00Z",
-  "completed_at": "2026-10-08T10:00:01Z"
+  "failure_reason": null
 }
 ```
 
-### Cancel a pending job
+## Cancel a pending job
 
 ```http
 DELETE {{base_url}}/jobs/{{job_id}}/
@@ -276,34 +338,30 @@ python .\worker.py
 The worker:
 
 1. Promotes due retry jobs into the main Redis queue.
-2. Pops one job with the lowest priority score (high before medium before low).
-3. Marks it as running and dispatches the correct handler.
-4. Marks successful work as completed.
-5. On an exception, schedules retries after 2, 4, and 8 seconds.
-6. Moves the job to the dead-letter queue after the final failed attempt.
+2. Pops one job with the lowest score (high before medium before low).
+3. Marks it running and dispatches the matching handler.
+4. Marks success as completed.
+5. Retries temporary failures with exponential backoff.
+6. Moves a job to the DLQ after its final failed attempt.
+7. If the terminal job is a refund, creates webhook + notification follow-ups.
 
-Provider calls are simulated so the project remains self-contained.
+Webhook or notification terminal states do not create additional follow-ups.
 
 ## Dead-letter queue
 
 These endpoints require a staff/superuser account.
-
-### List DLQ entries
 
 ```http
 GET {{base_url}}/dlq/
 Authorization: Bearer {{admin_access_token}}
 ```
 
-### Requeue an entry
+Requeue an entry:
 
 ```http
 POST {{base_url}}/dlq/{{dlq_id}}/requeue/
 Authorization: Bearer {{admin_access_token}}
 ```
-
-This resets the original job to pending, clears its execution state, and adds it
-to the main Redis queue.
 
 ## Metrics
 
@@ -316,41 +374,11 @@ GET {{base_url}}/metrics/summary/
 Authorization: Bearer {{access_token}}
 ```
 
-```json
-{
-  "total_jobs": 5,
-  "pending": 1,
-  "running": 0,
-  "completed": 3,
-  "failed": 0,
-  "dead": 1
-}
-```
-
 ### Counts by job type
 
 ```http
 GET {{base_url}}/metrics/job-types/
 Authorization: Bearer {{access_token}}
-```
-
-```json
-{
-  "job_types": [
-    {
-      "job_type": "refund_processing",
-      "total": 2
-    },
-    {
-      "job_type": "webhook_delivery",
-      "total": 2
-    },
-    {
-      "job_type": "send_notification",
-      "total": 1
-    }
-  ]
-}
 ```
 
 ### Failure rate
@@ -360,13 +388,5 @@ GET {{base_url}}/metrics/failure-rate/
 Authorization: Bearer {{access_token}}
 ```
 
-```json
-{
-  "total_jobs": 5,
-  "failed_jobs": 1,
-  "failure_rate_percent": 20.0
-}
-```
-
-In the current implementation, terminal worker failures use the `dead` status.
-The failure-rate endpoint counts both `failed` and `dead` statuses.
+Terminal worker failures use the `dead` status. The failure-rate endpoint counts
+both `failed` and `dead` statuses.
