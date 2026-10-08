@@ -1,6 +1,8 @@
-from django.conf import settings
-from django.utils import timezone
 from datetime import timedelta
+
+from django.conf import settings
+from django.db import transaction
+from django.utils import timezone
 
 from core.redis_client import get_redis_client
 
@@ -73,3 +75,83 @@ def promote_due_retries(redis_client=None):
             promoted_count += 1
 
     return promoted_count
+
+
+def create_refund_follow_up_jobs(refund_job, redis_client=None):
+    if refund_job.job_type != Job.JobType.REFUND_PROCESSING:
+        return []
+
+    if refund_job.status not in (Job.Status.COMPLETED, Job.Status.DEAD):
+        return []
+
+    payload = refund_job.payload
+    notification = payload.get('notification', {})
+
+    if refund_job.status == Job.Status.COMPLETED:
+        event = 'refund.completed'
+        refund_id = (refund_job.result or {}).get('refund_id')
+        message = (
+            f"Your refund of {payload.get('amount')} "
+            f"{payload.get('currency', 'INR')} has been processed."
+        )
+    else:
+        event = 'refund.failed'
+        refund_id = None
+        message = (
+            f"Your refund of {payload.get('amount')} "
+            f"{payload.get('currency', 'INR')} could not be processed."
+        )
+
+    event_data = {
+        'source_job_id': str(refund_job.id),
+        'transaction_id': payload.get('transaction_id'),
+        'refund_id': refund_id,
+        'amount': str(payload.get('amount')),
+        'currency': payload.get('currency', 'INR'),
+        'status': refund_job.status,
+    }
+
+    if refund_job.failure_reason:
+        event_data['failure_reason'] = refund_job.failure_reason
+
+    follow_up_specs = (
+        (
+            Job.JobType.WEBHOOK_DELIVERY,
+            Job.Priority.MEDIUM,
+            {
+                'url': payload.get('webhook_url'),
+                'event': event,
+                'data': event_data,
+            },
+        ),
+        (
+            Job.JobType.SEND_NOTIFICATION,
+            Job.Priority.LOW,
+            {
+                'channel': notification.get('channel'),
+                'recipient': notification.get('recipient'),
+                'message': message,
+            },
+        ),
+    )
+
+    follow_up_jobs = []
+
+    with transaction.atomic():
+        for job_type, priority, follow_up_payload in follow_up_specs:
+            follow_up_job, _ = Job.objects.get_or_create(
+                source_job=refund_job,
+                job_type=job_type,
+                defaults={
+                    'user': refund_job.user,
+                    'priority': priority,
+                    'payload': follow_up_payload,
+                },
+            )
+            follow_up_jobs.append(follow_up_job)
+
+    for follow_up_job in follow_up_jobs:
+        if follow_up_job.status == Job.Status.PENDING:
+            enqueue_job(follow_up_job, redis_client=redis_client)
+
+    return follow_up_jobs
