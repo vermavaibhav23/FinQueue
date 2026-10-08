@@ -1,8 +1,8 @@
 from django.contrib.auth.models import User
 from django.test import TestCase
-from rest_framework.test import APIRequestFactory
+from rest_framework.test import APIClient, APIRequestFactory
 
-from apps.jobs.models import Job
+from apps.jobs.models import IdempotencyRequest, Job
 from apps.jobs.serializers import JobSubmitSerializer
 from apps.jobs.services import calculate_priority_score
 
@@ -113,3 +113,92 @@ class JobSubmitSerializerTests(TestCase):
             calculate_priority_score(refund_job),
             calculate_priority_score(webhook_job),
         )
+
+
+
+class JobSubmissionIdempotencyTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username='merchant',
+            password='password123',
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(self.user)
+        self.url = '/jobs/submit/'
+        self.payload = {
+            'job_type': Job.JobType.REFUND_PROCESSING,
+            'payload': {
+                'transaction_id': 'txn-1001',
+                'amount': '1000.00',
+                'webhook_url': 'https://merchant.example/webhooks',
+                'notification': {
+                    'channel': 'email',
+                    'recipient': 'customer@example.com',
+                },
+            },
+        }
+
+    def test_same_key_and_same_request_returns_existing_job(self):
+        from unittest.mock import patch
+
+        with patch('apps.jobs.views.check_job_submission_rate_limit'):
+            first = self.client.post(
+                self.url,
+                self.payload,
+                format='json',
+                HTTP_IDEMPOTENCY_KEY='refund-1001',
+            )
+            second = self.client.post(
+                self.url,
+                self.payload,
+                format='json',
+                HTTP_IDEMPOTENCY_KEY='refund-1001',
+            )
+
+        self.assertEqual(first.status_code, 202)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(first.json()['id'], second.json()['id'])
+        self.assertFalse(first.json()['idempotent_replay'])
+        self.assertTrue(second.json()['idempotent_replay'])
+        self.assertEqual(Job.objects.count(), 1)
+        self.assertEqual(IdempotencyRequest.objects.count(), 1)
+
+    def test_same_key_with_different_request_is_rejected(self):
+        from unittest.mock import patch
+
+        changed_payload = {
+            **self.payload,
+            'payload': {
+                **self.payload['payload'],
+                'amount': '5000.00',
+            },
+        }
+
+        with patch('apps.jobs.views.check_job_submission_rate_limit'):
+            first = self.client.post(
+                self.url,
+                self.payload,
+                format='json',
+                HTTP_IDEMPOTENCY_KEY='refund-1001',
+            )
+            second = self.client.post(
+                self.url,
+                changed_payload,
+                format='json',
+                HTTP_IDEMPOTENCY_KEY='refund-1001',
+            )
+
+        self.assertEqual(first.status_code, 202)
+        self.assertEqual(second.status_code, 409)
+        self.assertEqual(Job.objects.count(), 1)
+        self.assertEqual(IdempotencyRequest.objects.count(), 1)
+
+    def test_missing_idempotency_key_is_rejected(self):
+        response = self.client.post(
+            self.url,
+            self.payload,
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(Job.objects.count(), 0)
