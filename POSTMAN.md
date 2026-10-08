@@ -114,6 +114,7 @@ webhook and notification jobs.
 ```http
 POST {{base_url}}/jobs/submit/
 Authorization: Bearer {{access_token}}
+Idempotency-Key: refund-1001
 Content-Type: application/json
 ```
 
@@ -141,11 +142,27 @@ Successful response (`202 Accepted`):
   "job_type": "refund_processing",
   "priority": "high",
   "status": "pending",
-  "created_at": "2026-10-08T10:00:00Z"
+  "created_at": "2026-10-08T10:00:00Z",
+  "idempotent_replay": false
 }
 ```
 
 The API has accepted the job; the worker will complete it later.
+
+### Merchant/API idempotency
+
+`Idempotency-Key` is required on job submission.
+
+- same merchant + same key + same payload -> return the existing job
+- same merchant + same key + different payload -> `409 Conflict`
+- new key -> create a new job
+
+FinQueue stores this mapping in the `idempotency_requests` table using the
+authenticated user, idempotency key, SHA-256 request hash, and created job ID.
+An idempotent replay returns `200 OK` with `"idempotent_replay": true`.
+
+This is separate from follow-up idempotency, which uses
+`UNIQUE(source_job, job_type, source_event)`.
 
 ### On refund success
 
