@@ -6,8 +6,8 @@ from django.db import models
 
 class Job(models.Model):
     class JobType(models.TextChoices):
-        PROCESS_PAYMENT = 'process_payment', 'Process Payment'
-        FRAUD_CHECK = 'fraud_check', 'Fraud Check'
+        REFUND_PROCESSING = 'refund_processing', 'Refund Processing'
+        WEBHOOK_DELIVERY = 'webhook_delivery', 'Webhook Delivery'
         SEND_NOTIFICATION = 'send_notification', 'Send Notification'
 
     class Priority(models.TextChoices):
