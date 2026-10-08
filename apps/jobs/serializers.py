@@ -64,6 +64,41 @@ class JobSubmitSerializer(serializers.ModelSerializer):
                 {'payload': 'Refund amount must be greater than 0.'}
             )
 
+        webhook_url = str(payload.get('webhook_url', '')).strip()
+        if not webhook_url.startswith(('http://', 'https://')):
+            raise serializers.ValidationError(
+                {
+                    'payload': (
+                        'refund_processing requires webhook_url so the terminal '
+                        'refund event can be delivered asynchronously.'
+                    )
+                }
+            )
+
+        notification = payload.get('notification')
+        if not isinstance(notification, dict):
+            raise serializers.ValidationError(
+                {
+                    'payload': (
+                        'refund_processing requires a notification object with '
+                        'channel and recipient.'
+                    )
+                }
+            )
+
+        channel = str(notification.get('channel', '')).lower().strip()
+        recipient = str(notification.get('recipient', '')).strip()
+
+        if channel not in {'email', 'sms', 'push'}:
+            raise serializers.ValidationError(
+                {'payload': 'Notification channel must be email, sms, or push.'}
+            )
+
+        if not recipient:
+            raise serializers.ValidationError(
+                {'payload': 'Notification recipient is required.'}
+            )
+
     @staticmethod
     def _validate_webhook_payload(payload):
         url = str(payload.get('url', '')).strip()
@@ -112,6 +147,7 @@ class JobSerializer(serializers.ModelSerializer):
         model = Job
         fields = (
             'id',
+            'source_job',
             'job_type',
             'priority',
             'status',
