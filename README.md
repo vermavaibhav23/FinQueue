@@ -1,24 +1,38 @@
 # FinQueue
 
-FinQueue is an asynchronous payment job-processing simulation built with Django,
+FinQueue is an asynchronous job-processing simulation built with Django,
 Django REST Framework, MySQL, and Redis.
 
 It demonstrates:
 
 - JWT-based registration, login, and logout
 - Redis-backed priority queues
+- Server-assigned job priorities
 - Exponential retry scheduling
 - Dead-letter queue handling
-- Simulated payment processing, fraud checks, and notifications
+- Simulated refund processing, webhook delivery, and user notifications
 - Per-user operational metrics
 - Submission rate limiting
 
+## Job types and priority policy
+
+FinQueue supports three asynchronous job types:
+
+| Job type | Priority | Purpose |
+| --- | --- | --- |
+| `refund_processing` | High | Simulates returning money through a payment provider |
+| `webhook_delivery` | Medium | Simulates system-to-system HTTP event delivery |
+| `send_notification` | Low | Simulates email, SMS, or push communication to a person |
+
+Priority is derived by the server from `job_type`; clients cannot escalate their
+own work by supplying a higher priority.
+
 ## Architecture
 
-MySQL is the durable source of truth for jobs and transactions. Redis sorted sets
-provide the main and retry queues. The standalone worker promotes due retries,
-pops the highest-priority job, executes its handler, and saves the outcome in
-MySQL.
+MySQL is the durable source of truth for jobs. Redis sorted sets provide the
+main priority queue and retry queue. The standalone worker promotes due retries,
+pops the highest-priority job, dispatches it to the appropriate handler, and
+stores the outcome in MySQL.
 
 ```text
 Client -> Django REST API -> MySQL
@@ -26,9 +40,30 @@ Client -> Django REST API -> MySQL
                     +------> Redis main queue
                                   |
                                Worker
-                          /         |         \
-                     completed   retry queue   DLQ
+                    /              |               \
+          refund handler    webhook handler    notification handler
+                    \              |               /
+                     +------ completed / retry ------+
+                                      |
+                                     DLQ
 ```
+
+Job submission returns `202 Accepted` because the API accepts and queues the
+work while the worker completes it asynchronously.
+
+## Failure simulation
+
+Handlers are intentionally self-contained so the project can run without real
+payment, webhook, email, or SMS providers. Add:
+
+```json
+{
+  "simulate_failure": true
+}
+```
+
+inside a valid job payload to simulate a temporary provider failure. The worker
+then exercises the normal retry, exponential-backoff, and DLQ flow.
 
 ## Local setup
 
@@ -90,7 +125,8 @@ python .\manage.py test --settings=finqueue.test_settings
 
 ## Project scope
 
-FinQueue is an educational simulation. Its worker processes one job at a time and
-assumes handlers terminate. A production deployment would normally add multiple
-worker processes, hard execution timeouts, atomic job reservation, idempotency,
-and recovery for abandoned running jobs.
+FinQueue is an educational simulation. Its worker processes one job at a time
+and the provider calls are simulated. A production deployment would normally add
+multiple worker processes, hard execution timeouts, atomic job reservation,
+idempotency, provider-specific security such as webhook signatures, and recovery
+for abandoned running jobs.
