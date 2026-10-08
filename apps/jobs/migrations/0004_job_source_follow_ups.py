@@ -20,11 +20,16 @@ class Migration(migrations.Migration):
                 to='jobs.job',
             ),
         ),
+        migrations.AddField(
+            model_name='job',
+            name='source_event',
+            field=models.CharField(blank=True, max_length=64, null=True),
+        ),
         migrations.AddConstraint(
             model_name='job',
             constraint=models.UniqueConstraint(
-                fields=('source_job', 'job_type'),
-                name='unique_follow_up_type_per_source_job',
+                fields=('source_job', 'job_type', 'source_event'),
+                name='unique_follow_up_per_source_event',
             ),
         ),
     ]
