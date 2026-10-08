@@ -148,6 +148,7 @@ class JobSerializer(serializers.ModelSerializer):
         fields = (
             'id',
             'source_job',
+            'source_event',
             'job_type',
             'priority',
             'status',
