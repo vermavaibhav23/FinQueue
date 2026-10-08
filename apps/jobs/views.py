@@ -18,7 +18,7 @@ class JobSubmitView(generics.CreateAPIView):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         job = serializer.save()
-        queue_score = enqueue_job(job)
+        enqueue_job(job)
 
         return Response(
             {
@@ -26,10 +26,9 @@ class JobSubmitView(generics.CreateAPIView):
                 'job_type': job.job_type,
                 'priority': job.priority,
                 'status': job.status,
-                'queue_score': queue_score,
                 'created_at': job.created_at,
             },
-            status=status.HTTP_201_CREATED,
+            status=status.HTTP_202_ACCEPTED,
         )
 
 
