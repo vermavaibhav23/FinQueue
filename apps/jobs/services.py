@@ -141,6 +141,7 @@ def create_refund_follow_up_jobs(refund_job, redis_client=None):
         for job_type, priority, follow_up_payload in follow_up_specs:
             follow_up_job, _ = Job.objects.get_or_create(
                 source_job=refund_job,
+                source_event=event,
                 job_type=job_type,
                 defaults={
                     'user': refund_job.user,
