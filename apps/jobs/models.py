@@ -110,3 +110,32 @@ class Transaction(models.Model):
 
     def __str__(self):
         return f'{self.status} transaction for {self.amount} {self.currency}'
+
+
+class IdempotencyRequest(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='idempotency_requests',
+    )
+    idempotency_key = models.CharField(max_length=128)
+    request_hash = models.CharField(max_length=64)
+    job = models.OneToOneField(
+        Job,
+        on_delete=models.CASCADE,
+        related_name='idempotency_request',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'idempotency_requests'
+        constraints = [
+            models.UniqueConstraint(
+                fields=('user', 'idempotency_key'),
+                name='unique_user_idempotency_key',
+            ),
+        ]
+
+    def __str__(self):
+        return f'{self.user_id}:{self.idempotency_key}'
