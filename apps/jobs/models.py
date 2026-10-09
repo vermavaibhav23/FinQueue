@@ -71,47 +71,6 @@ class Job(models.Model):
         return f'{self.job_type} [{self.status}]'
 
 
-class Transaction(models.Model):
-    class Status(models.TextChoices):
-        SUCCESS = 'success', 'Success'
-        FAILED = 'failed', 'Failed'
-        SUSPICIOUS = 'suspicious', 'Suspicious'
-        REJECTED = 'rejected', 'Rejected'
-
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    job = models.ForeignKey(
-        Job,
-        on_delete=models.CASCADE,
-        related_name='transactions',
-    )
-    user = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        on_delete=models.CASCADE,
-        related_name='transactions',
-    )
-    amount = models.DecimalField(max_digits=12, decimal_places=2)
-    merchant = models.CharField(max_length=255)
-    currency = models.CharField(max_length=8, default='INR')
-    device_id = models.CharField(max_length=255, blank=True)
-    location = models.CharField(max_length=255, blank=True)
-    status = models.CharField(max_length=16, choices=Status.choices)
-    risk_score = models.PositiveSmallIntegerField(default=0)
-    risk_reasons = models.JSONField(default=list, blank=True)
-    processed_at = models.DateTimeField()
-
-    class Meta:
-        db_table = 'transactions'
-        ordering = ('-processed_at',)
-        indexes = [
-            models.Index(fields=('user', 'processed_at')),
-            models.Index(fields=('status', 'processed_at')),
-            models.Index(fields=('job',)),
-        ]
-
-    def __str__(self):
-        return f'{self.status} transaction for {self.amount} {self.currency}'
-
-
 class IdempotencyRequest(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.ForeignKey(
