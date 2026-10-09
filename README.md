@@ -47,8 +47,8 @@ FinQueue now demonstrates all three idempotency layers discussed in the design:
 3. **External side-effect idempotency** — every retry of the same logical
    external action reuses a stable ID:
    - refund provider call: `Idempotency-Key: refund:<job_uuid>`
-   - webhook delivery: `event_id = refund.completed:<source_job_uuid>`
-     (or `refund.failed:<source_job_uuid>`)
+   - webhook delivery: `event_id = webhook:refund.completed:<source_job_uuid>`
+     (or `webhook:refund.failed:<source_job_uuid>`)
    - notification delivery:
      `notification_id = notification:<event>:<source_job_uuid>`
 
