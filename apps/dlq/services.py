@@ -10,13 +10,11 @@ def move_to_dead_letter_queue(job, failure_reason):
     job.status = Job.Status.DEAD
     job.failure_reason = failure_reason
     job.completed_at = timezone.now()
-    job.lease_expires_at = None
     job.save(
         update_fields=(
             'status',
             'failure_reason',
             'completed_at',
-            'lease_expires_at',
             'updated_at',
         )
     )
@@ -37,7 +35,6 @@ def requeue_dead_letter_job(dlq_entry, redis_client=None):
     job.result = None
     job.failure_reason = None
     job.completed_at = None
-    job.lease_expires_at = None
     job.save(
         update_fields=(
             'status',
@@ -45,7 +42,6 @@ def requeue_dead_letter_job(dlq_entry, redis_client=None):
             'result',
             'failure_reason',
             'completed_at',
-            'lease_expires_at',
             'updated_at',
         )
     )
