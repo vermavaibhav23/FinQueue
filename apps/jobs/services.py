@@ -102,6 +102,11 @@ def create_refund_follow_up_jobs(refund_job, redis_client=None):
             f"{payload.get('currency', 'INR')} could not be processed."
         )
 
+    # These IDs stay stable for the same logical external side effect.
+    # A downstream merchant/provider can use them as its idempotency key.
+    event_id = f'{event}:{refund_job.id}'
+    notification_id = f'notification:{event}:{refund_job.id}'
+
     event_data = {
         'source_job_id': str(refund_job.id),
         'transaction_id': payload.get('transaction_id'),
@@ -121,6 +126,7 @@ def create_refund_follow_up_jobs(refund_job, redis_client=None):
             {
                 'url': payload.get('webhook_url'),
                 'event': event,
+                'event_id': event_id,
                 'data': event_data,
             },
         ),
@@ -131,6 +137,7 @@ def create_refund_follow_up_jobs(refund_job, redis_client=None):
                 'channel': notification.get('channel'),
                 'recipient': notification.get('recipient'),
                 'message': message,
+                'notification_id': notification_id,
             },
         ),
     )
