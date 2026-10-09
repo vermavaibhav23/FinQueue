@@ -1,5 +1,6 @@
 from django.contrib.auth.models import User
 from django.test import TestCase
+from django.utils import timezone
 from rest_framework.test import APIClient, APIRequestFactory
 
 from apps.jobs.models import IdempotencyRequest, Job
@@ -223,7 +224,7 @@ class JobCancellationSafetyTests(TestCase):
                 'url': 'https://merchant.example/webhooks',
                 'event': 'refund.completed',
             },
-            started_at=__import__('django.utils.timezone', fromlist=['now']).now(),
+            started_at=timezone.now(),
         )
 
         response = self.client.delete(f'/jobs/{job.id}/')
