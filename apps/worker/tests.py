@@ -53,7 +53,6 @@ class WorkerRetryTests(TestCase):
         self.assertEqual(job.status, Job.Status.PENDING)
         self.assertEqual(job.retry_count, 1)
         self.assertEqual(job.failure_reason, 'gateway timeout')
-        self.assertIsNone(job.lease_expires_at)
         self.assertEqual(Job.objects.filter(source_job=job).count(), 0)
 
     def test_completed_refund_creates_webhook_and_notification_jobs(self):
@@ -328,8 +327,7 @@ class StaleJobRecoveryTests(TestCase):
                 'url': 'https://merchant.example/webhooks',
                 'event': 'refund.completed',
             },
-            started_at=now - timedelta(minutes=1),
-            lease_expires_at=now - timedelta(seconds=1),
+            started_at=now - timedelta(seconds=31),
         )
 
         recovered = recover_stale_running_jobs(
@@ -340,7 +338,6 @@ class StaleJobRecoveryTests(TestCase):
 
         self.assertEqual(recovered, 1)
         self.assertEqual(job.status, Job.Status.PENDING)
-        self.assertIsNone(job.lease_expires_at)
         self.assertIsNotNone(job.started_at)
         self.assertIn('previous external attempt outcome may be unknown', job.failure_reason)
         self.assertIn(
@@ -348,7 +345,7 @@ class StaleJobRecoveryTests(TestCase):
             self.redis.sorted_sets[settings.FINQUEUE_JOBS_KEY],
         )
 
-    def test_unexpired_running_job_is_not_recovered(self):
+    def test_running_job_under_30_seconds_is_not_recovered(self):
         now = timezone.now()
         job = Job.objects.create(
             user=self.user,
@@ -359,8 +356,7 @@ class StaleJobRecoveryTests(TestCase):
                 'url': 'https://merchant.example/webhooks',
                 'event': 'refund.completed',
             },
-            started_at=now,
-            lease_expires_at=now + timedelta(seconds=20),
+            started_at=now - timedelta(seconds=20),
         )
 
         recovered = recover_stale_running_jobs(
