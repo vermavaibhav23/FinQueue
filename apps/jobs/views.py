@@ -109,10 +109,7 @@ class JobSubmitView(generics.CreateAPIView):
         return Response(
             {
                 'id': job.id,
-                'job_type': job.job_type,
-                'priority': job.priority,
                 'status': job.status,
-                'created_at': job.created_at,
                 'idempotent_replay': idempotent_replay,
             },
             status=status_code,
