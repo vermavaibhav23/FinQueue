@@ -202,3 +202,51 @@ class JobSubmissionIdempotencyTests(TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertEqual(Job.objects.count(), 0)
+
+
+class JobCancellationSafetyTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            username='cancel-user',
+            password='password123',
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(self.user)
+
+    def test_recovered_or_retried_pending_job_cannot_be_hard_deleted(self):
+        job = Job.objects.create(
+            user=self.user,
+            job_type=Job.JobType.WEBHOOK_DELIVERY,
+            priority=Job.Priority.MEDIUM,
+            status=Job.Status.PENDING,
+            payload={
+                'url': 'https://merchant.example/webhooks',
+                'event': 'refund.completed',
+            },
+            started_at=__import__('django.utils.timezone', fromlist=['now']).now(),
+        )
+
+        response = self.client.delete(f'/jobs/{job.id}/')
+
+        self.assertEqual(response.status_code, 400)
+        self.assertTrue(Job.objects.filter(id=job.id).exists())
+
+    def test_never_started_pending_job_can_be_cancelled(self):
+        from unittest.mock import patch
+
+        job = Job.objects.create(
+            user=self.user,
+            job_type=Job.JobType.WEBHOOK_DELIVERY,
+            priority=Job.Priority.MEDIUM,
+            status=Job.Status.PENDING,
+            payload={
+                'url': 'https://merchant.example/webhooks',
+                'event': 'manual.test',
+            },
+        )
+
+        with patch('apps.jobs.views.remove_job_from_queues'):
+            response = self.client.delete(f'/jobs/{job.id}/')
+
+        self.assertEqual(response.status_code, 204)
+        self.assertFalse(Job.objects.filter(id=job.id).exists())
