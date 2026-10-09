@@ -305,8 +305,15 @@ normal business flow creates them automatically from a terminal refund.
 
 ## Simulate provider failure
 
-Add `simulate_failure: true` to a valid handler payload to exercise retry and
-DLQ behavior.
+The dummy handlers randomly fail by default to mimic unreliable external
+services:
+
+- refund: 20% failure chance
+- webhook: 15% failure chance
+- notification: 10% failure chance
+
+Add `simulate_failure: true` to a valid handler payload when you want to force
+a deterministic failure and exercise retry/DLQ behavior.
 
 For example, to force the refund itself to fail on every attempt:
 
