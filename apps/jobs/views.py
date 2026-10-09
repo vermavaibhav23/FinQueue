@@ -147,8 +147,13 @@ class JobDetailView(generics.RetrieveDestroyAPIView):
         return Job.objects.filter(user=self.request.user)
 
     def perform_destroy(self, instance):
-        if instance.status != Job.Status.PENDING:
-            raise ValidationError('Only pending jobs can be cancelled.')
+        # A recovered stale job is PENDING again, but it may already have caused
+        # an external side effect before its old worker crashed. Never hard-delete
+        # a job that has already started at least once.
+        if instance.status != Job.Status.PENDING or instance.started_at is not None:
+            raise ValidationError(
+                'Only pending jobs that have never started can be cancelled.'
+            )
 
         remove_job_from_queues(instance.id)
         instance.delete()
