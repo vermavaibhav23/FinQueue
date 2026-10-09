@@ -7,10 +7,34 @@ from apps.jobs.models import Job
 logger = logging.getLogger(__name__)
 
 
+def get_external_operation_id(job):
+    """
+    Return the stable ID FinQueue sends to the downstream system.
+
+    The same Job row is retried after failures/recovery, so deriving the ID from
+    persisted job/source information guarantees every retry sends the same ID.
+    The receiving system still has to honor that ID for true external
+    idempotency.
+    """
+    if job.job_type == Job.JobType.REFUND_PROCESSING:
+        return f'refund:{job.id}'
+
+    if job.job_type == Job.JobType.WEBHOOK_DELIVERY:
+        event_id = str(job.payload.get('event_id', '')).strip()
+        return event_id or f'webhook:{job.id}'
+
+    if job.job_type == Job.JobType.SEND_NOTIFICATION:
+        notification_id = str(job.payload.get('notification_id', '')).strip()
+        return notification_id or f'notification:{job.id}'
+
+    return f'job:{job.id}'
+
+
 def handle_refund_processing(job):
     payload = job.payload
     amount = _get_amount(payload)
     transaction_id = str(payload.get('transaction_id', '')).strip()
+    idempotency_key = get_external_operation_id(job)
 
     if amount <= 0:
         raise ValueError('Refund amount must be greater than 0.')
@@ -18,7 +42,17 @@ def handle_refund_processing(job):
     if not transaction_id:
         raise ValueError('Refund requires transaction_id.')
 
-    # Simulate an external payment provider call without requiring a real gateway.
+    # Simulate:
+    # POST payment-provider/refunds
+    # Idempotency-Key: refund:<job UUID>
+    #
+    # A real provider must store/honor this key so retrying the same FinQueue
+    # job cannot create a second refund.
+    logger.info(
+        'Simulated refund provider call for transaction %s with Idempotency-Key=%s.',
+        transaction_id,
+        idempotency_key,
+    )
     time.sleep(1)
 
     if payload.get('simulate_failure'):
@@ -32,6 +66,7 @@ def handle_refund_processing(job):
         'status': 'REFUNDED',
         'amount': str(amount),
         'currency': payload.get('currency', 'INR'),
+        'external_idempotency_key': idempotency_key,
     }
 
 
@@ -39,6 +74,7 @@ def handle_webhook_delivery(job):
     payload = job.payload
     url = str(payload.get('url', '')).strip()
     event = str(payload.get('event', '')).strip()
+    event_id = get_external_operation_id(job)
 
     if not url.startswith(('http://', 'https://')):
         raise ValueError('Webhook requires a valid http/https url.')
@@ -46,24 +82,31 @@ def handle_webhook_delivery(job):
     if not event:
         raise ValueError('Webhook requires an event name.')
 
-    # This project intentionally simulates the outbound HTTP call so it can be
-    # demonstrated locally without depending on an external webhook endpoint.
+    # A real outbound body would contain event_id. The merchant backend should
+    # store processed event IDs and return success without re-applying the side
+    # effect when it receives the same event_id again.
+    outbound_body = {
+        'event_id': event_id,
+        'event': event,
+        'data': payload.get('data', {}),
+    }
+
     time.sleep(0.5)
 
     if payload.get('simulate_failure'):
         raise RuntimeError('Webhook endpoint returned a temporary 5xx response.')
 
     logger.info(
-        'Simulated webhook delivery to %s for event %s with data %s.',
+        'Simulated webhook delivery to %s with body %s.',
         url,
-        event,
-        payload.get('data', {}),
+        outbound_body,
     )
 
     return {
         'delivery_status': 'DELIVERED',
         'url': url,
         'event': event,
+        'event_id': event_id,
         'http_status': 200,
     }
 
@@ -73,6 +116,7 @@ def handle_send_notification(job):
     channel = str(payload.get('channel', '')).lower().strip()
     recipient = str(payload.get('recipient', '')).strip()
     message = str(payload.get('message', '')).strip()
+    notification_id = get_external_operation_id(job)
 
     if channel not in {'email', 'sms', 'push'}:
         raise ValueError('Notification channel must be email, sms, or push.')
@@ -80,15 +124,18 @@ def handle_send_notification(job):
     if not recipient or not message:
         raise ValueError('Notification requires recipient and message.')
 
+    # A real notification provider would receive notification_id as an
+    # idempotency/deduplication key. Retrying the same FinQueue job reuses it.
     time.sleep(0.25)
 
     if payload.get('simulate_failure'):
         raise RuntimeError(f'{channel} provider is temporarily unavailable.')
 
     logger.info(
-        'Simulated %s notification to %s: %s',
+        'Simulated %s notification to %s with notification_id=%s: %s',
         channel,
         recipient,
+        notification_id,
         message,
     )
 
@@ -96,6 +143,7 @@ def handle_send_notification(job):
         'notification_status': 'SENT',
         'channel': channel,
         'recipient': recipient,
+        'notification_id': notification_id,
     }
 
 
