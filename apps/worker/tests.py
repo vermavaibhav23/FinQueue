@@ -193,6 +193,22 @@ class WorkerRetryTests(TestCase):
             with self.assertRaisesRegex(RuntimeError, 'temporary 5xx'):
                 dispatch_job(job)
 
+    def test_refund_handler_can_fail_randomly(self):
+        user = User.objects.create_user(username='refund-random-failure')
+        job = Job.objects.create(
+            user=user,
+            job_type=Job.JobType.REFUND_PROCESSING,
+            priority=Job.Priority.HIGH,
+            payload=refund_payload(),
+        )
+
+        with patch('apps.worker.handlers.time.sleep'), patch(
+            'apps.worker.handlers.random.random',
+            return_value=0.0,
+        ):
+            with self.assertRaisesRegex(RuntimeError, 'temporarily unavailable'):
+                dispatch_job(job)
+
     def test_notification_handler_success(self):
         user = User.objects.create_user(username='notification-user')
         job = Job.objects.create(
@@ -206,7 +222,10 @@ class WorkerRetryTests(TestCase):
             },
         )
 
-        with patch('apps.worker.handlers.time.sleep'):
+        with patch('apps.worker.handlers.time.sleep'), patch(
+            'apps.worker.handlers.random.random',
+            return_value=1.0,
+        ):
             result = dispatch_job(job)
 
         self.assertEqual(
@@ -233,7 +252,10 @@ class ExternalIdempotencyTests(TestCase):
         expected = f'refund:{job.id}'
         first_key = get_external_operation_id(job)
 
-        with patch('apps.worker.handlers.time.sleep'):
+        with patch('apps.worker.handlers.time.sleep'), patch(
+            'apps.worker.handlers.random.random',
+            return_value=1.0,
+        ):
             first_result = dispatch_job(job)
             second_result = dispatch_job(job)
 
@@ -259,7 +281,10 @@ class ExternalIdempotencyTests(TestCase):
 
         first_key = get_external_operation_id(job)
 
-        with patch('apps.worker.handlers.time.sleep'):
+        with patch('apps.worker.handlers.time.sleep'), patch(
+            'apps.worker.handlers.random.random',
+            return_value=1.0,
+        ):
             first_result = dispatch_job(job)
             second_result = dispatch_job(job)
 
@@ -291,7 +316,10 @@ class ExternalIdempotencyTests(TestCase):
 
         first_key = get_external_operation_id(job)
 
-        with patch('apps.worker.handlers.time.sleep'):
+        with patch('apps.worker.handlers.time.sleep'), patch(
+            'apps.worker.handlers.random.random',
+            return_value=1.0,
+        ):
             first_result = dispatch_job(job)
             second_result = dispatch_job(job)
 
