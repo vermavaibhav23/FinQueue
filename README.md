@@ -261,7 +261,15 @@ healthy job; it is intentionally not implemented in the current version.
 ## Failure simulation
 
 Provider calls are simulated so the project runs without real payment, webhook,
-email, or SMS providers. Add:
+email, or SMS providers. The dummy handlers now use Python's `random` module
+to occasionally fail by default:
+
+- refund provider: 20% simulated failure rate
+- webhook endpoint: 15% simulated failure rate
+- notification provider: 10% simulated failure rate
+
+This lets retries, exponential backoff, and DLQ behavior happen naturally during
+a demo. For a deterministic forced-failure test, add:
 
 ```json
 {
@@ -269,8 +277,7 @@ email, or SMS providers. Add:
 }
 ```
 
-inside a valid job payload to force a temporary handler failure and exercise the
-retry/backoff/DLQ flow.
+inside a valid job payload.
 
 ## Local setup
 
