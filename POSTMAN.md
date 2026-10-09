@@ -214,9 +214,21 @@ Example generated notification payload:
 {
   "channel": "email",
   "recipient": "customer@example.com",
-  "message": "Your refund of 1000.00 INR has been processed."
+  "message": "Your refund of 1000.00 INR has been processed.",
+  "notification_id": "notification:refund.completed:12f18c85-b610-4bf6-9fd9-1b5a9c645e78"
 }
 ```
+
+For Layer 3 external idempotency, these IDs appear at different boundaries:
+
+- the initial merchant -> FinQueue refund request does **not** contain an external
+  event ID; FinQueue creates the refund job first
+- when the refund worker calls a real payment provider, it would send
+  `Idempotency-Key: refund:<refund_job_uuid>` as an outbound request header
+- the internally generated webhook job stores `event_id` in its payload and
+  the outbound webhook body includes that same `event_id`
+- the internally generated notification job stores `notification_id` in its
+  payload and a real notification provider would receive that same stable ID
 
 ### On terminal refund failure
 
