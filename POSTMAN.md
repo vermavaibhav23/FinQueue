@@ -164,6 +164,20 @@ An idempotent replay returns `200 OK` with `"idempotent_replay": true`.
 This is separate from follow-up idempotency, which uses
 `UNIQUE(source_job, job_type, source_event)`.
 
+### External side-effect idempotency
+
+FinQueue also sends a stable downstream idempotency/event ID on every retry of
+the same logical external action:
+
+- refund provider: `Idempotency-Key: refund:<job_uuid>`
+- webhook: stable `event_id`
+- notification provider: stable `notification_id`
+
+If a worker crashes after the external system processed the request but before
+FinQueue saved `COMPLETED`, stale-job recovery may retry the job. The retry
+reuses the same stable ID. The receiving payment gateway, merchant backend, or
+notification provider must honor that ID and deduplicate the operation.
+
 ### On refund success
 
 The refund becomes `completed` and FinQueue internally creates:
@@ -182,6 +196,7 @@ Example generated webhook payload:
 {
   "url": "https://merchant.example/webhooks",
   "event": "refund.completed",
+  "event_id": "refund.completed:12f18c85-b610-4bf6-9fd9-1b5a9c645e78",
   "data": {
     "source_job_id": "12f18c85-b610-4bf6-9fd9-1b5a9c645e78",
     "transaction_id": "txn-1001",
@@ -344,7 +359,10 @@ DELETE {{base_url}}/jobs/{{job_id}}/
 Authorization: Bearer {{access_token}}
 ```
 
-Only pending jobs can be deleted. A successful deletion returns `204 No Content`.
+Only a `pending` job that has **never started** can be deleted. A recovered
+stale job may be `pending` again but still has `started_at`, so deletion is
+rejected because an external side effect may already have happened. A successful
+deletion of a never-started job returns `204 No Content`.
 
 ## Worker behavior
 
@@ -354,17 +372,30 @@ Run the worker in another terminal:
 python .\worker.py
 ```
 
-The worker:
+The normal worker:
 
 1. Promotes due retry jobs into the main Redis queue.
 2. Pops one job with the lowest score (high before medium before low).
-3. Marks it running and dispatches the matching handler.
-4. Marks success as completed.
-5. Retries temporary failures with exponential backoff.
-6. Moves a job to the DLQ after its final failed attempt.
-7. If the terminal job is a refund, creates webhook + notification follow-ups.
+3. Marks it `running`, creates a worker lease, and starts heartbeats.
+4. Dispatches the matching handler.
+5. Marks success as completed.
+6. Retries temporary failures with exponential backoff.
+7. Moves a job to the DLQ after its final failed attempt.
+8. If the terminal job is a refund, creates webhook + notification follow-ups.
 
 Webhook or notification terminal states do not create additional follow-ups.
+
+Run the separate stale-job recovery process in another terminal:
+
+```powershell
+python .\recovery_worker.py
+```
+
+A healthy worker renews its lease every 10 seconds by default. If the worker
+process dies, the lease eventually expires. The recovery process detects
+`RUNNING` jobs with expired leases, changes them back to `PENDING`, and
+re-enqueues the same job ID. The retried handler then sends the same external
+idempotency/event ID again.
 
 ## Dead-letter queue
 
