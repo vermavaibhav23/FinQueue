@@ -159,6 +159,8 @@ class JobSubmissionIdempotencyTests(TestCase):
         self.assertEqual(first.status_code, 202)
         self.assertEqual(second.status_code, 200)
         self.assertEqual(first.json()['id'], second.json()['id'])
+        self.assertEqual(set(first.json()), {'id', 'status', 'idempotent_replay'})
+        self.assertEqual(set(second.json()), {'id', 'status', 'idempotent_replay'})
         self.assertFalse(first.json()['idempotent_replay'])
         self.assertTrue(second.json()['idempotent_replay'])
         self.assertEqual(Job.objects.count(), 1)
