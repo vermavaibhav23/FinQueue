@@ -377,7 +377,7 @@ The normal worker:
 
 1. Promotes due retry jobs into the main Redis queue.
 2. Pops one job with the lowest score (high before medium before low).
-3. Marks it `running`, creates a worker lease, and starts heartbeats.
+3. Marks it `running` and records `started_at`.
 4. Dispatches the matching handler.
 5. Marks success as completed.
 6. Retries temporary failures with exponential backoff.
@@ -392,11 +392,14 @@ Run the separate stale-job recovery process in another terminal:
 python .\recovery_worker.py
 ```
 
-A healthy worker renews its lease every 10 seconds by default. If the worker
-process dies, the lease eventually expires. The recovery process detects
-`RUNNING` jobs with expired leases, changes them back to `PENDING`, and
-re-enqueues the same job ID. The retried handler then sends the same external
-idempotency/event ID again.
+The recovery process treats a job as stale when it has remained `RUNNING`
+for more than 30 seconds based on `started_at`. It changes that job back to
+`PENDING` and re-enqueues the same job ID. The retried handler then sends the
+same external idempotency/event ID again.
+
+This fixed threshold is intentionally simple for the project. A lease +
+heartbeat design is kept as a future production enhancement for cases where a
+legitimate job may run longer than the threshold.
 
 ## Dead-letter queue
 
