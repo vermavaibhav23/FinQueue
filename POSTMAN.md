@@ -170,7 +170,7 @@ FinQueue also sends a stable downstream idempotency/event ID on every retry of
 the same logical external action:
 
 - refund provider: `Idempotency-Key: refund:<job_uuid>`
-- webhook: stable `event_id`
+- webhook: stable `event_id` such as `webhook:refund.completed:<refund_job_uuid>`
 - notification provider: stable `notification_id`
 
 If a worker crashes after the external system processed the request but before
@@ -196,7 +196,7 @@ Example generated webhook payload:
 {
   "url": "https://merchant.example/webhooks",
   "event": "refund.completed",
-  "event_id": "refund.completed:12f18c85-b610-4bf6-9fd9-1b5a9c645e78",
+  "event_id": "webhook:refund.completed:12f18c85-b610-4bf6-9fd9-1b5a9c645e78",
   "data": {
     "source_job_id": "12f18c85-b610-4bf6-9fd9-1b5a9c645e78",
     "transaction_id": "txn-1001",
