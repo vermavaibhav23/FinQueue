@@ -190,7 +190,16 @@ Client -> Django REST API -> MySQL
 ```
 
 Job submission returns `202 Accepted` because the API accepts and queues the
-work while the worker completes it asynchronously.
+work while the worker completes it asynchronously. The submit response is kept
+minimal: `id`, current `status`, and `idempotent_replay`.
+
+Worker `result` JSON is also kept focused on the actual outcome:
+- refund: refund ID, transaction ID, refund status, amount, currency
+- webhook: `webhook_delivery_status` and HTTP status
+- notification: `notification_status` and channel
+
+Stable Layer 3 idempotency/event IDs are used for the outbound external call
+but are not duplicated inside the final `result` JSON.
 
 ## Worker crash recovery
 
