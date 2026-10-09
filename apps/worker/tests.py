@@ -172,7 +172,7 @@ class WorkerRetryTests(TestCase):
         engine = WorkerEngine()
         engine.redis_client = FakeRedis()
 
-        engine.mark_completed(job, {'delivery_status': 'DELIVERED'})
+        engine.mark_completed(job, {'webhook_delivery_status': 'DELIVERED', 'http_status': 200})
 
         self.assertEqual(Job.objects.filter(source_job=job).count(), 0)
 
