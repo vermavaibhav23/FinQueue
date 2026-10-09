@@ -66,7 +66,6 @@ def handle_refund_processing(job):
         'status': 'REFUNDED',
         'amount': str(amount),
         'currency': payload.get('currency', 'INR'),
-        'external_idempotency_key': idempotency_key,
     }
 
 
@@ -103,10 +102,7 @@ def handle_webhook_delivery(job):
     )
 
     return {
-        'delivery_status': 'DELIVERED',
-        'url': url,
-        'event': event,
-        'event_id': event_id,
+        'webhook_delivery_status': 'DELIVERED',
         'http_status': 200,
     }
 
@@ -142,8 +138,6 @@ def handle_send_notification(job):
     return {
         'notification_status': 'SENT',
         'channel': channel,
-        'recipient': recipient,
-        'notification_id': notification_id,
     }
 
 
