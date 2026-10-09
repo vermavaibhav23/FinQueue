@@ -21,6 +21,17 @@ It demonstrates:
 - Separate stale-job recovery process for RUNNING jobs older than 30 seconds
 - Stable external operation/event IDs for retry-safe downstream calls
 
+## Persistent tables
+
+The active design intentionally keeps persistence small:
+
+- `jobs` — current asynchronous job state, payload, retries, result, and failure data
+- `idempotency_requests` — Layer 1 merchant request idempotency
+- `dead_letter_queue` — jobs that exhausted retries
+
+The old `transactions` model/table was removed because it duplicated information
+already available in the job workflow and was not used by the current handlers.
+
 ## Job types and priority policy
 
 | Job type | Priority | Purpose |
