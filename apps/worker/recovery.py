@@ -1,5 +1,6 @@
 import logging
 import time
+from datetime import timedelta
 
 from django.conf import settings
 from django.db import transaction
@@ -28,24 +29,25 @@ def recover_pending_jobs():
 
 def recover_stale_running_jobs(redis_client=None, now=None):
     """
-    Requeue RUNNING jobs whose worker lease expired.
+    Requeue jobs that have remained RUNNING beyond the configured threshold.
 
-    A healthy worker keeps extending lease_expires_at from a heartbeat thread.
-    A hard process crash stops that heartbeat. The separate recovery process
-    then moves the abandoned job back to PENDING and puts it in Redis again.
-
-    started_at is intentionally preserved so we still know the job was already
-    attempted. Because an external call may have succeeded just before the
-    crash, handlers must reuse a stable external idempotency/event ID.
+    The educational project uses a simple 30-second threshold. started_at is
+    intentionally preserved after recovery so FinQueue still knows the job was
+    previously attempted. Because an external call may already have succeeded
+    before a worker crash, every retry must reuse its stable external
+    idempotency/event ID.
     """
     redis_client = redis_client or get_redis_client()
     now = now or timezone.now()
+    stale_before = now - timedelta(
+        seconds=settings.FINQUEUE_STALE_RUNNING_SECONDS
+    )
 
     stale_ids = list(
         Job.objects.filter(
             status=Job.Status.RUNNING,
-            lease_expires_at__isnull=False,
-            lease_expires_at__lte=now,
+            started_at__isnull=False,
+            started_at__lte=stale_before,
         ).values_list('id', flat=True)
     )
 
@@ -58,8 +60,8 @@ def recover_stale_running_jobs(redis_client=None, now=None):
                 .filter(
                     id=job_id,
                     status=Job.Status.RUNNING,
-                    lease_expires_at__isnull=False,
-                    lease_expires_at__lte=timezone.now(),
+                    started_at__isnull=False,
+                    started_at__lte=stale_before,
                 )
                 .first()
             )
@@ -68,24 +70,18 @@ def recover_stale_running_jobs(redis_client=None, now=None):
                 continue
 
             job.status = Job.Status.PENDING
-            job.lease_expires_at = None
             job.failure_reason = (
-                'Recovered after worker lease expired; previous external '
-                'attempt outcome may be unknown.'
+                'Recovered after remaining RUNNING beyond the stale-job '
+                'threshold; previous external attempt outcome may be unknown.'
             )
             job.save(
                 update_fields=(
                     'status',
-                    'lease_expires_at',
                     'failure_reason',
                     'updated_at',
                 )
             )
 
-            # Enqueue while the DB row lock is still held. If Redis fails, the
-            # transaction rolls back and the job remains RUNNING so the next
-            # recovery scan can try again. If the DB later rolls back after the
-            # Redis write, a normal worker will pop the ID, see RUNNING, and skip.
             enqueue_job(job, redis_client=redis_client)
 
         recovered_count += 1
