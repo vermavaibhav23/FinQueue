@@ -1,10 +1,15 @@
 import logging
+import random
 import time
 from decimal import Decimal, InvalidOperation
 
 from apps.jobs.models import Job
 
 logger = logging.getLogger(__name__)
+
+REFUND_FAILURE_RATE = 0.20
+WEBHOOK_FAILURE_RATE = 0.15
+NOTIFICATION_FAILURE_RATE = 0.10
 
 
 def get_external_operation_id(job):
@@ -55,7 +60,7 @@ def handle_refund_processing(job):
     )
     time.sleep(1)
 
-    if payload.get('simulate_failure'):
+    if _should_simulate_failure(payload, REFUND_FAILURE_RATE):
         raise RuntimeError('Refund provider is temporarily unavailable.')
 
     refund_id = f'refund-{str(job.id)[:8]}'
@@ -92,7 +97,7 @@ def handle_webhook_delivery(job):
 
     time.sleep(0.5)
 
-    if payload.get('simulate_failure'):
+    if _should_simulate_failure(payload, WEBHOOK_FAILURE_RATE):
         raise RuntimeError('Webhook endpoint returned a temporary 5xx response.')
 
     logger.info(
@@ -124,7 +129,7 @@ def handle_send_notification(job):
     # idempotency/deduplication key. Retrying the same FinQueue job reuses it.
     time.sleep(0.25)
 
-    if payload.get('simulate_failure'):
+    if _should_simulate_failure(payload, NOTIFICATION_FAILURE_RATE):
         raise RuntimeError(f'{channel} provider is temporarily unavailable.')
 
     logger.info(
@@ -153,6 +158,15 @@ def dispatch_job(job):
         raise ValueError(f'Unsupported job type: {job.job_type}')
 
     return handler(job)
+
+
+def _should_simulate_failure(payload, failure_rate):
+    # Explicit flag is kept for deterministic demos/tests. Otherwise the dummy
+    # provider fails randomly so retries/backoff/DLQ can happen naturally.
+    if payload.get('simulate_failure'):
+        return True
+
+    return random.random() < failure_rate
 
 
 def _get_amount(payload):
