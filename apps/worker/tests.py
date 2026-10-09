@@ -209,9 +209,13 @@ class WorkerRetryTests(TestCase):
         with patch('apps.worker.handlers.time.sleep'):
             result = dispatch_job(job)
 
-        self.assertEqual(result['notification_status'], 'SENT')
-        self.assertEqual(result['channel'], 'email')
-        self.assertEqual(result['notification_id'], f'notification:{job.id}')
+        self.assertEqual(
+            result,
+            {
+                'notification_status': 'SENT',
+                'channel': 'email',
+            },
+        )
 
 
 class ExternalIdempotencyTests(TestCase):
@@ -226,13 +230,19 @@ class ExternalIdempotencyTests(TestCase):
             payload=refund_payload(),
         )
 
-        with patch('apps.worker.handlers.time.sleep'):
-            first = dispatch_job(job)
-            second = dispatch_job(job)
-
         expected = f'refund:{job.id}'
-        self.assertEqual(first['external_idempotency_key'], expected)
-        self.assertEqual(second['external_idempotency_key'], expected)
+        first_key = get_external_operation_id(job)
+
+        with patch('apps.worker.handlers.time.sleep'):
+            first_result = dispatch_job(job)
+            second_result = dispatch_job(job)
+
+        second_key = get_external_operation_id(job)
+
+        self.assertEqual(first_key, expected)
+        self.assertEqual(second_key, expected)
+        self.assertEqual(first_result, second_result)
+        self.assertNotIn('external_idempotency_key', first_result)
 
     def test_webhook_reuses_persisted_event_id(self):
         job = Job.objects.create(
@@ -247,12 +257,24 @@ class ExternalIdempotencyTests(TestCase):
             },
         )
 
-        with patch('apps.worker.handlers.time.sleep'):
-            first = dispatch_job(job)
-            second = dispatch_job(job)
+        first_key = get_external_operation_id(job)
 
-        self.assertEqual(first['event_id'], 'webhook:refund.completed:source-123')
-        self.assertEqual(second['event_id'], 'webhook:refund.completed:source-123')
+        with patch('apps.worker.handlers.time.sleep'):
+            first_result = dispatch_job(job)
+            second_result = dispatch_job(job)
+
+        second_key = get_external_operation_id(job)
+
+        self.assertEqual(first_key, 'webhook:refund.completed:source-123')
+        self.assertEqual(second_key, 'webhook:refund.completed:source-123')
+        self.assertEqual(
+            first_result,
+            {
+                'webhook_delivery_status': 'DELIVERED',
+                'http_status': 200,
+            },
+        )
+        self.assertEqual(second_result, first_result)
 
     def test_notification_reuses_persisted_notification_id(self):
         job = Job.objects.create(
@@ -267,18 +289,30 @@ class ExternalIdempotencyTests(TestCase):
             },
         )
 
+        first_key = get_external_operation_id(job)
+
         with patch('apps.worker.handlers.time.sleep'):
-            first = dispatch_job(job)
-            second = dispatch_job(job)
+            first_result = dispatch_job(job)
+            second_result = dispatch_job(job)
+
+        second_key = get_external_operation_id(job)
 
         self.assertEqual(
-            first['notification_id'],
+            first_key,
             'notification:refund.completed:source-123',
         )
         self.assertEqual(
-            second['notification_id'],
+            second_key,
             'notification:refund.completed:source-123',
         )
+        self.assertEqual(
+            first_result,
+            {
+                'notification_status': 'SENT',
+                'channel': 'email',
+            },
+        )
+        self.assertEqual(second_result, first_result)
 
     def test_fallback_external_ids_are_derived_from_job_id(self):
         webhook = Job.objects.create(
