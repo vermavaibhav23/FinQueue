@@ -14,20 +14,13 @@ import os
 from datetime import timedelta
 from pathlib import Path
 
-# Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-
-# Quick-start development settings - unsuitable for production
-# See https://docs.djangoproject.com/en/4.2/howto/deployment/checklist/
-
-# SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = os.environ.get(
     'DJANGO_SECRET_KEY',
     'django-insecure-local-dev-only-change-me',
 )
 
-# SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = os.environ.get('DJANGO_DEBUG', 'True') == 'True'
 
 ALLOWED_HOSTS = [
@@ -35,9 +28,6 @@ ALLOWED_HOSTS = [
     for host in os.environ.get('DJANGO_ALLOWED_HOSTS', 'localhost,127.0.0.1').split(',')
     if host.strip()
 ]
-
-
-# Application definition
 
 INSTALLED_APPS = [
     'django.contrib.admin',
@@ -85,10 +75,6 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'finqueue.wsgi.application'
 
-
-# Database
-# https://docs.djangoproject.com/en/4.2/ref/settings/#databases
-
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.mysql',
@@ -107,6 +93,20 @@ REDIS_URL = os.environ.get('REDIS_URL', 'redis://127.0.0.1:6379/0')
 FINQUEUE_JOBS_KEY = os.environ.get('FINQUEUE_JOBS_KEY', 'finqueue:jobs')
 FINQUEUE_RETRY_KEY = os.environ.get('FINQUEUE_RETRY_KEY', 'finqueue:retries')
 FINQUEUE_MAX_RETRIES = int(os.environ.get('FINQUEUE_MAX_RETRIES', '3'))
+
+# A healthy worker renews its lease while it owns a RUNNING job. If the worker
+# process dies, heartbeats stop and the separate recovery process may safely
+# consider the lease abandoned after it expires.
+FINQUEUE_JOB_LEASE_SECONDS = int(
+    os.environ.get('FINQUEUE_JOB_LEASE_SECONDS', '30')
+)
+FINQUEUE_HEARTBEAT_INTERVAL_SECONDS = int(
+    os.environ.get('FINQUEUE_HEARTBEAT_INTERVAL_SECONDS', '10')
+)
+FINQUEUE_RECOVERY_POLL_SECONDS = int(
+    os.environ.get('FINQUEUE_RECOVERY_POLL_SECONDS', '5')
+)
+
 JOB_SUBMISSION_RATE_LIMIT = int(os.environ.get('JOB_SUBMISSION_RATE_LIMIT', '10'))
 JOB_SUBMISSION_RATE_WINDOW_SECONDS = int(
     os.environ.get('JOB_SUBMISSION_RATE_WINDOW_SECONDS', '60')
@@ -137,10 +137,6 @@ SIMPLE_JWT = {
     'AUTH_HEADER_TYPES': ('Bearer',),
 }
 
-
-# Password validation
-# https://docs.djangoproject.com/en/4.2/ref/settings/#auth-password-validators
-
 AUTH_PASSWORD_VALIDATORS = [
     {
         'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator',
@@ -156,27 +152,12 @@ AUTH_PASSWORD_VALIDATORS = [
     },
 ]
 
-
-# Internationalization
-# https://docs.djangoproject.com/en/4.2/topics/i18n/
-
 LANGUAGE_CODE = 'en-us'
-
 TIME_ZONE = 'UTC'
-
 USE_I18N = True
-
 USE_TZ = True
 
-
-# Static files (CSS, JavaScript, Images)
-# https://docs.djangoproject.com/en/4.2/howto/static-files/
-
 STATIC_URL = 'static/'
-
 STATIC_ROOT = BASE_DIR / 'staticfiles'
-
-# Default primary key field type
-# https://docs.djangoproject.com/en/4.2/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
