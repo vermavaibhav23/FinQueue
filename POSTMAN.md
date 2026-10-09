@@ -139,10 +139,7 @@ Successful response (`202 Accepted`):
 ```json
 {
   "id": "12f18c85-b610-4bf6-9fd9-1b5a9c645e78",
-  "job_type": "refund_processing",
-  "priority": "high",
   "status": "pending",
-  "created_at": "2026-10-08T10:00:00Z",
   "idempotent_replay": false
 }
 ```
@@ -218,6 +215,34 @@ Example generated notification payload:
   "notification_id": "notification:refund.completed:12f18c85-b610-4bf6-9fd9-1b5a9c645e78"
 }
 ```
+
+Worker result JSON is intentionally concise:
+
+```json
+// refund_processing result
+{
+  "refund_id": "refund-12f18c85",
+  "transaction_id": "txn-1001",
+  "status": "REFUNDED",
+  "amount": "1000.00",
+  "currency": "INR"
+}
+
+// webhook_delivery result
+{
+  "webhook_delivery_status": "DELIVERED",
+  "http_status": 200
+}
+
+// send_notification result
+{
+  "notification_status": "SENT",
+  "channel": "email"
+}
+```
+
+External idempotency IDs are used while making the outbound call and are not
+duplicated in `Job.result`.
 
 For Layer 3 external idempotency, these IDs appear at different boundaries:
 
@@ -358,8 +383,7 @@ Example completed refund:
     "transaction_id": "txn-1001",
     "status": "REFUNDED",
     "amount": "1000.00",
-    "currency": "INR",
-    "external_idempotency_key": "refund:12f18c85-b610-4bf6-9fd9-1b5a9c645e78"
+    "currency": "INR"
   },
   "failure_reason": null
 }
