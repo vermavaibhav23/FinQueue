@@ -51,7 +51,6 @@ class Job(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
     started_at = models.DateTimeField(null=True, blank=True)
     completed_at = models.DateTimeField(null=True, blank=True)
-    lease_expires_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         db_table = 'jobs'
@@ -60,10 +59,6 @@ class Job(models.Model):
             models.Index(fields=('user', 'status')),
             models.Index(fields=('job_type', 'status')),
             models.Index(fields=('priority', 'created_at')),
-            models.Index(
-                fields=('status', 'lease_expires_at'),
-                name='jobs_status_lease_idx',
-            ),
         ]
         constraints = [
             models.UniqueConstraint(
