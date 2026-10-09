@@ -160,5 +160,6 @@ class JobSerializer(serializers.ModelSerializer):
             'updated_at',
             'started_at',
             'completed_at',
+            'lease_expires_at',
         )
         read_only_fields = fields
