@@ -346,7 +346,8 @@ Example completed refund:
     "transaction_id": "txn-1001",
     "status": "REFUNDED",
     "amount": "1000.00",
-    "currency": "INR"
+    "currency": "INR",
+    "external_idempotency_key": "refund:12f18c85-b610-4bf6-9fd9-1b5a9c645e78"
   },
   "failure_reason": null
 }
