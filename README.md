@@ -18,6 +18,8 @@ It demonstrates:
 - Per-user operational metrics
 - Submission rate limiting
 - Merchant API idempotency using `Idempotency-Key` + request hash
+- Worker leases + heartbeats with a separate stale-job recovery process
+- Stable external operation/event IDs for retry-safe downstream calls
 
 ## Job types and priority policy
 
@@ -30,9 +32,9 @@ It demonstrates:
 Priority is derived by the server from `job_type`; clients cannot escalate
 their own work by sending a higher priority.
 
-## Idempotency currently implemented
+## Idempotency layers
 
-FinQueue currently protects duplicates at two layers:
+FinQueue now demonstrates all three idempotency layers discussed in the design:
 
 1. **Merchant/API submission idempotency** — every external job submission must
    include an `Idempotency-Key`. FinQueue stores `user + idempotency_key +
@@ -42,9 +44,20 @@ FinQueue currently protects duplicates at two layers:
 2. **Follow-up job creation idempotency** — internally generated webhook and
    notification jobs are protected by
    `UNIQUE(source_job, job_type, source_event)`.
+3. **External side-effect idempotency** — every retry of the same logical
+   external action reuses a stable ID:
+   - refund provider call: `Idempotency-Key: refund:<job_uuid>`
+   - webhook delivery: `event_id = refund.completed:<source_job_uuid>`
+     (or `refund.failed:<source_job_uuid>`)
+   - notification delivery:
+     `notification_id = notification:<event>:<source_job_uuid>`
 
-External-delivery deduplication after a worker crashes mid-delivery is intentionally
-left out of this educational version for now.
+Layer 3 is cooperative: FinQueue guarantees that it sends the **same stable ID**
+on every retry, but the payment gateway, merchant webhook receiver, or
+notification provider must store/check that ID and avoid applying the same side
+effect twice. Because the external providers are simulated in this project,
+the code demonstrates FinQueue's side of that contract rather than pretending
+the local database can guarantee exactly-once behavior in another system.
 
 ## Main asynchronous flow
 
@@ -179,6 +192,53 @@ Client -> Django REST API -> MySQL
 Job submission returns `202 Accepted` because the API accepts and queues the
 work while the worker completes it asynchronously.
 
+## Worker crash recovery
+
+A normal worker does not resume from the exact Python instruction where it
+crashed. To recover abandoned `RUNNING` jobs without incorrectly treating a
+legitimately slow healthy job as dead, FinQueue uses a lease + heartbeat design.
+
+When a worker claims a job it stores:
+
+```text
+status = RUNNING
+lease_expires_at = now + 30 seconds
+```
+
+While the handler is still alive, a heartbeat thread renews the lease every
+10 seconds. If the whole worker process crashes, the heartbeat stops. A separate
+recovery process scans for expired RUNNING leases:
+
+```text
+RUNNING + expired lease
+        |
+        v
+PENDING
+        |
+        v
+re-enqueue same job ID in Redis
+```
+
+The recovered job keeps its original `started_at`, so FinQueue still knows it
+was attempted before. This is important because the external operation may
+already have succeeded immediately before the crash.
+
+That creates the classic uncertainty window:
+
+```text
+external system processes request successfully
+        |
+worker crashes before saving COMPLETED
+        |
+FinQueue cannot know the external outcome with certainty
+        |
+lease expires -> recovery retries the same job
+        |
+same stable external idempotency/event ID is sent again
+```
+
+This is why stale-job recovery and Layer 3 idempotency are designed together.
+
 ## Failure simulation
 
 Provider calls are simulated so the project runs without real payment, webhook,
@@ -213,11 +273,23 @@ python .\manage.py migrate
 python .\manage.py runserver
 ```
 
-In another terminal, set the same environment variables and start the worker:
+In another terminal, set the same environment variables and start the normal
+job worker:
 
 ```powershell
 python .\worker.py
 ```
+
+Start the stale-job recovery process in a third terminal:
+
+```powershell
+python .\recovery_worker.py
+```
+
+Defaults are a 30-second job lease, 10-second heartbeat interval, and 5-second
+recovery scan interval. They can be changed with
+`FINQUEUE_JOB_LEASE_SECONDS`, `FINQUEUE_HEARTBEAT_INTERVAL_SECONDS`, and
+`FINQUEUE_RECOVERY_POLL_SECONDS`.
 
 Alternatively, start MySQL and Redis with Docker Desktop:
 
@@ -236,7 +308,7 @@ with the commands above.
 - `POST /jobs/submit/`
 - `GET /jobs/`
 - `GET /jobs/<job_id>/`
-- `DELETE /jobs/<job_id>/`
+- `DELETE /jobs/<job_id>/` (only a never-started pending job)
 - `GET /dlq/` (admin only)
 - `POST /dlq/<dlq_id>/requeue/` (admin only)
 - `GET /metrics/summary/`
@@ -253,8 +325,9 @@ python .\manage.py test --settings=finqueue.test_settings
 
 ## Project scope
 
-FinQueue is an educational simulation. Its worker processes one job at a time
-and external providers are simulated. A production deployment would normally
-add multiple workers, hard execution timeouts, atomic reservation/outbox
-patterns, external-delivery deduplication, webhook signatures, real provider
-integrations, and richer merchant/customer models.
+FinQueue is an educational simulation. Each worker process handles one job at
+a time and external providers are simulated. Multiple worker processes can be
+run for concurrent job processing. A production deployment would normally add
+managed worker supervision, stronger outbox/reconciliation patterns, webhook
+signatures, real provider integrations that honor the stable idempotency IDs,
+and richer merchant/customer models.
