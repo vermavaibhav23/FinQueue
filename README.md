@@ -18,7 +18,7 @@ It demonstrates:
 - Per-user operational metrics
 - Submission rate limiting
 - Merchant API idempotency using `Idempotency-Key` + request hash
-- Worker leases + heartbeats with a separate stale-job recovery process
+- Separate stale-job recovery process for RUNNING jobs older than 30 seconds
 - Stable external operation/event IDs for retry-safe downstream calls
 
 ## Job types and priority policy
@@ -195,33 +195,29 @@ work while the worker completes it asynchronously.
 ## Worker crash recovery
 
 A normal worker does not resume from the exact Python instruction where it
-crashed. To recover abandoned `RUNNING` jobs without incorrectly treating a
-legitimately slow healthy job as dead, FinQueue uses a lease + heartbeat design.
+crashed. If a worker dies after changing a job to `RUNNING`, that job would
+otherwise remain stuck forever.
 
-When a worker claims a job it stores:
+For this educational version, a separate recovery process uses a simple
+30-second stale threshold:
 
 ```text
 status = RUNNING
-lease_expires_at = now + 30 seconds
-```
-
-While the handler is still alive, a heartbeat thread renews the lease every
-10 seconds. If the whole worker process crashes, the heartbeat stops. A separate
-recovery process scans for expired RUNNING leases:
-
-```text
-RUNNING + expired lease
+started_at older than 30 seconds
         |
         v
-PENDING
+treat as stale
         |
         v
-re-enqueue same job ID in Redis
+RUNNING -> PENDING
+        |
+        v
+re-enqueue the same job ID in Redis
 ```
 
 The recovered job keeps its original `started_at`, so FinQueue still knows it
-was attempted before. This is important because the external operation may
-already have succeeded immediately before the crash.
+was attempted before. This matters because the external operation may already
+have succeeded immediately before the worker crashed.
 
 That creates the classic uncertainty window:
 
@@ -232,12 +228,15 @@ worker crashes before saving COMPLETED
         |
 FinQueue cannot know the external outcome with certainty
         |
-lease expires -> recovery retries the same job
+30-second stale recovery retries the same job
         |
 same stable external idempotency/event ID is sent again
 ```
 
-This is why stale-job recovery and Layer 3 idempotency are designed together.
+Layer 3 idempotency therefore makes stale-job retries safe at the downstream
+service. A lease + heartbeat mechanism would be a stronger production
+enhancement because it avoids incorrectly reclaiming a legitimately long-running
+healthy job; it is intentionally not implemented in the current version.
 
 ## Failure simulation
 
@@ -286,10 +285,9 @@ Start the stale-job recovery process in a third terminal:
 python .\recovery_worker.py
 ```
 
-Defaults are a 30-second job lease, 10-second heartbeat interval, and 5-second
-recovery scan interval. They can be changed with
-`FINQUEUE_JOB_LEASE_SECONDS`, `FINQUEUE_HEARTBEAT_INTERVAL_SECONDS`, and
-`FINQUEUE_RECOVERY_POLL_SECONDS`.
+By default, the recovery process treats a RUNNING job as stale after 30 seconds
+and scans every 5 seconds. These values can be changed with
+`FINQUEUE_STALE_RUNNING_SECONDS` and `FINQUEUE_RECOVERY_POLL_SECONDS`.
 
 Alternatively, start MySQL and Redis with Docker Desktop:
 
@@ -330,4 +328,6 @@ a time and external providers are simulated. Multiple worker processes can be
 run for concurrent job processing. A production deployment would normally add
 managed worker supervision, stronger outbox/reconciliation patterns, webhook
 signatures, real provider integrations that honor the stable idempotency IDs,
-and richer merchant/customer models.
+and richer merchant/customer models. A lease + heartbeat worker-ownership
+mechanism is also a future enhancement beyond the current fixed 30-second
+stale threshold.
