@@ -36,7 +36,6 @@ def requeue_dead_letter_job(dlq_entry, redis_client=None):
     job.retry_count = 0
     job.result = None
     job.failure_reason = None
-    job.started_at = None
     job.completed_at = None
     job.lease_expires_at = None
     job.save(
@@ -45,7 +44,6 @@ def requeue_dead_letter_job(dlq_entry, redis_client=None):
             'retry_count',
             'result',
             'failure_reason',
-            'started_at',
             'completed_at',
             'lease_expires_at',
             'updated_at',
