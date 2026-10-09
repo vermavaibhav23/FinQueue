@@ -104,7 +104,7 @@ def create_refund_follow_up_jobs(refund_job, redis_client=None):
 
     # These IDs stay stable for the same logical external side effect.
     # A downstream merchant/provider can use them as its idempotency key.
-    event_id = f'{event}:{refund_job.id}'
+    event_id = f'webhook:{event}:{refund_job.id}'
     notification_id = f'notification:{event}:{refund_job.id}'
 
     event_data = {
