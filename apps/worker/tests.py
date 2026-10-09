@@ -92,7 +92,7 @@ class WorkerRetryTests(TestCase):
         self.assertEqual(webhook.payload['data']['refund_id'], 'refund-123')
         self.assertEqual(
             webhook.payload['event_id'],
-            f'refund.completed:{job.id}',
+            f'webhook:refund.completed:{job.id}',
         )
         self.assertEqual(notification.priority, Job.Priority.LOW)
         self.assertEqual(
@@ -128,7 +128,7 @@ class WorkerRetryTests(TestCase):
         self.assertEqual(webhook.payload['event'], 'refund.failed')
         self.assertEqual(
             webhook.payload['event_id'],
-            f'refund.failed:{job.id}',
+            f'webhook:refund.failed:{job.id}',
         )
         self.assertEqual(
             webhook.payload['data']['failure_reason'],
@@ -242,7 +242,7 @@ class ExternalIdempotencyTests(TestCase):
             payload={
                 'url': 'https://merchant.example/webhooks',
                 'event': 'refund.completed',
-                'event_id': 'refund.completed:source-123',
+                'event_id': 'webhook:refund.completed:source-123',
                 'data': {'refund_id': 'refund-123'},
             },
         )
@@ -251,8 +251,8 @@ class ExternalIdempotencyTests(TestCase):
             first = dispatch_job(job)
             second = dispatch_job(job)
 
-        self.assertEqual(first['event_id'], 'refund.completed:source-123')
-        self.assertEqual(second['event_id'], 'refund.completed:source-123')
+        self.assertEqual(first['event_id'], 'webhook:refund.completed:source-123')
+        self.assertEqual(second['event_id'], 'webhook:refund.completed:source-123')
 
     def test_notification_reuses_persisted_notification_id(self):
         job = Job.objects.create(
