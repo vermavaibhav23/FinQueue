@@ -72,16 +72,33 @@ def promote_due_retries(redis_client=None):
     promoted_count = 0
 
     for job_id in due_job_ids:
-        removed = redis_client.zrem(settings.FINQUEUE_RETRY_KEY, job_id)
-
-        if removed:
-            job = Job.objects.filter(id=job_id, status=Job.Status.PENDING).first()
+        with transaction.atomic():
+            job = (
+                Job.objects.select_for_update()
+                .filter(id=job_id)
+                .first()
+            )
 
             if job is None:
+                redis_client.zrem(settings.FINQUEUE_RETRY_KEY, job_id)
                 continue
 
-            enqueue_job(job, redis_client=redis_client)
-            promoted_count += 1
+            if job.status == Job.Status.FAILED:
+                job.status = Job.Status.PENDING
+                job.save(update_fields=('status', 'updated_at'))
+                record_job_history(
+                    job,
+                    message='Retry delay elapsed; job returned to the main queue.',
+                )
+            elif job.status != Job.Status.PENDING:
+                redis_client.zrem(settings.FINQUEUE_RETRY_KEY, job_id)
+                continue
+
+        # Enqueue first, then remove from the retry set. If the process dies
+        # between these two Redis operations, re-adding the same member is safe.
+        enqueue_job(job, redis_client=redis_client)
+        redis_client.zrem(settings.FINQUEUE_RETRY_KEY, job_id)
+        promoted_count += 1
 
     return promoted_count
 
