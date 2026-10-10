@@ -7,7 +7,7 @@ from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from .models import IdempotencyRequest, Job
+from .models import Job
 from .rate_limits import check_job_submission_rate_limit
 from .serializers import JobSerializer, JobSubmitSerializer
 from .services import enqueue_job, remove_job_from_queues
@@ -35,14 +35,10 @@ class JobSubmitView(generics.CreateAPIView):
 
         request_hash = self._request_hash(serializer.validated_data)
 
-        existing = (
-            IdempotencyRequest.objects.select_related('job')
-            .filter(
-                user=request.user,
-                idempotency_key=idempotency_key,
-            )
-            .first()
-        )
+        existing = Job.objects.filter(
+            user=request.user,
+            idempotency_key=idempotency_key,
+        ).first()
 
         if existing is not None:
             return self._replay_or_conflict(existing, request_hash)
@@ -51,17 +47,15 @@ class JobSubmitView(generics.CreateAPIView):
 
         try:
             with transaction.atomic():
-                job = serializer.save()
-                IdempotencyRequest.objects.create(
-                    user=request.user,
+                job = serializer.save(
                     idempotency_key=idempotency_key,
                     request_hash=request_hash,
-                    job=job,
                 )
                 transaction.on_commit(lambda: enqueue_job(job))
         except IntegrityError:
-            # Another request with the same merchant + key may have won the race.
-            existing = IdempotencyRequest.objects.select_related('job').get(
+            # Another request with the same user + idempotency key may have won
+            # the race. The database uniqueness constraint decides the winner.
+            existing = Job.objects.get(
                 user=request.user,
                 idempotency_key=idempotency_key,
             )
@@ -87,8 +81,8 @@ class JobSubmitView(generics.CreateAPIView):
         )
         return hashlib.sha256(canonical_json.encode('utf-8')).hexdigest()
 
-    def _replay_or_conflict(self, existing, request_hash):
-        if existing.request_hash != request_hash:
+    def _replay_or_conflict(self, existing_job, request_hash):
+        if existing_job.request_hash != request_hash:
             return Response(
                 {
                     'detail': (
@@ -99,7 +93,7 @@ class JobSubmitView(generics.CreateAPIView):
             )
 
         return self._job_response(
-            existing.job,
+            existing_job,
             status_code=status.HTTP_200_OK,
             idempotent_replay=True,
         )
