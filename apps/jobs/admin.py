@@ -11,10 +11,10 @@ class JobAdmin(admin.ModelAdmin):
         'job_type',
         'priority',
         'status',
+        'idempotency_key',
         'retry_count',
         'created_at',
     )
     list_filter = ('job_type', 'priority', 'status')
-    search_fields = ('id', 'user__username')
+    search_fields = ('id', 'user__username', 'idempotency_key')
     readonly_fields = ('id', 'created_at', 'updated_at')
-
