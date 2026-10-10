@@ -154,9 +154,12 @@ The API has accepted the job; the worker will complete it later.
 - same merchant + same key + different payload -> `409 Conflict`
 - new key -> create a new job
 
-FinQueue stores this mapping in the `idempotency_requests` table using the
-authenticated user, idempotency key, SHA-256 request hash, and created job ID.
-An idempotent replay returns `200 OK` with `"idempotent_replay": true`.
+FinQueue stores the `idempotency_key` and SHA-256 `request_hash` directly
+on the submitted `jobs` row. The database enforces
+`UNIQUE(user, idempotency_key)`, so the same key can be reused by a different
+authenticated user without collision. Internally generated follow-up jobs leave
+these fields `NULL`. An idempotent replay returns `200 OK` with
+`"idempotent_replay": true`.
 
 This is separate from follow-up idempotency, which uses
 `UNIQUE(source_job, job_type, source_event)`.
