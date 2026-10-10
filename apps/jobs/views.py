@@ -10,7 +10,7 @@ from rest_framework.response import Response
 from .models import Job
 from .rate_limits import check_job_submission_rate_limit
 from .serializers import JobSerializer, JobSubmitSerializer
-from .services import enqueue_job, remove_job_from_queues
+from .services import enqueue_job, record_job_history, remove_job_from_queues
 
 
 class JobSubmitView(generics.CreateAPIView):
@@ -51,6 +51,7 @@ class JobSubmitView(generics.CreateAPIView):
                     idempotency_key=idempotency_key,
                     request_hash=request_hash,
                 )
+                record_job_history(job, message='Job created.')
                 transaction.on_commit(lambda: enqueue_job(job))
         except IntegrityError:
             # Another request with the same user + idempotency key may have won
