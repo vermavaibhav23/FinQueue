@@ -7,6 +7,7 @@ from django.test import TestCase, override_settings
 from django.utils import timezone
 
 from apps.jobs.models import Job, JobHistory
+from apps.jobs.services import promote_due_retries
 from apps.worker.engine import WorkerEngine
 from apps.worker.handlers import dispatch_job, get_external_operation_id
 from apps.worker.recovery import recover_stale_running_jobs
@@ -18,6 +19,21 @@ class FakeRedis:
 
     def zadd(self, key, mapping):
         self.sorted_sets.setdefault(key, {}).update(mapping)
+
+    def zrangebyscore(self, key, min_score, max_score):
+        members = self.sorted_sets.get(key, {})
+        return [
+            member
+            for member, score in members.items()
+            if min_score <= score <= max_score
+        ]
+
+    def zrem(self, key, member):
+        members = self.sorted_sets.get(key, {})
+        if member in members:
+            del members[member]
+            return 1
+        return 0
 
 
 def refund_payload():
@@ -50,15 +66,54 @@ class WorkerRetryTests(TestCase):
         engine.mark_failed(job, 'gateway timeout')
         job.refresh_from_db()
 
-        self.assertEqual(job.status, Job.Status.PENDING)
+        self.assertEqual(job.status, Job.Status.FAILED)
         self.assertEqual(job.retry_count, 1)
         self.assertEqual(job.failure_reason, 'gateway timeout')
         self.assertEqual(Job.objects.filter(source_job=job).count(), 0)
 
         history = JobHistory.objects.filter(job=job).latest('created_at')
-        self.assertEqual(history.status, Job.Status.PENDING)
+        self.assertEqual(history.status, Job.Status.FAILED)
         self.assertEqual(history.retry_count, 1)
         self.assertIn('gateway timeout', history.message)
+        self.assertIn(
+            str(job.id),
+            engine.redis_client.sorted_sets[settings.FINQUEUE_RETRY_KEY],
+        )
+
+    def test_due_retry_is_marked_pending_and_moved_to_main_queue(self):
+        user = User.objects.create_user(username='retry-due')
+        job = Job.objects.create(
+            user=user,
+            job_type=Job.JobType.REFUND_PROCESSING,
+            priority=Job.Priority.HIGH,
+            status=Job.Status.FAILED,
+            retry_count=1,
+            payload=refund_payload(),
+            failure_reason='gateway timeout',
+        )
+        redis_client = FakeRedis()
+        redis_client.zadd(
+            settings.FINQUEUE_RETRY_KEY,
+            {str(job.id): timezone.now().timestamp() - 1},
+        )
+
+        promoted = promote_due_retries(redis_client=redis_client)
+        job.refresh_from_db()
+
+        self.assertEqual(promoted, 1)
+        self.assertEqual(job.status, Job.Status.PENDING)
+        self.assertNotIn(
+            str(job.id),
+            redis_client.sorted_sets[settings.FINQUEUE_RETRY_KEY],
+        )
+        self.assertIn(
+            str(job.id),
+            redis_client.sorted_sets[settings.FINQUEUE_JOBS_KEY],
+        )
+
+        history = JobHistory.objects.filter(job=job).latest('created_at')
+        self.assertEqual(history.status, Job.Status.PENDING)
+        self.assertIn('Retry delay elapsed', history.message)
 
     def test_completed_refund_creates_webhook_and_notification_jobs(self):
         user = User.objects.create_user(username='refund-success')
