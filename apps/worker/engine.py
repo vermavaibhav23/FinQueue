@@ -104,7 +104,7 @@ class WorkerEngine:
             with transaction.atomic():
                 job.retry_count += 1
                 delay_seconds = calculate_retry_delay(job.retry_count)
-                job.status = Job.Status.PENDING
+                job.status = Job.Status.FAILED
                 job.failure_reason = failure_reason
                 job.completed_at = None
                 job.save(
@@ -123,7 +123,7 @@ class WorkerEngine:
 
             retry_at = schedule_retry(job, delay_seconds, self.redis_client)
             logger.warning(
-                'Retrying job %s in %s seconds at %s.',
+                'Job %s failed; retry scheduled in %s seconds at %s.',
                 job.id,
                 delay_seconds,
                 retry_at,
