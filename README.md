@@ -25,11 +25,20 @@ It demonstrates:
 
 The active design intentionally keeps persistence small:
 
-- `jobs` — asynchronous job state plus Layer 1 submission idempotency metadata
+- `jobs` — current asynchronous job state plus Layer 1 submission idempotency metadata
+- `job_history` — append-only business/audit history of important job status changes
 - `dead_letter_queue` — jobs that exhausted retries
 
 The old `transactions` model/table was removed because it duplicated information
 already available in the job workflow and was not used by the current handlers.
+
+The `job_history` table is intentionally small. Each row stores the job,
+its status at that moment, retry count, an optional message, and a timestamp.
+The worker appends history rows when a job starts, retries, completes, or becomes
+dead. Stale recovery and DLQ requeue also append rows. The main `jobs` table
+therefore answers "what is the job's current state?", while `job_history`
+answers "what happened to this job over time?".
+
 
 ## Job types and priority policy
 
