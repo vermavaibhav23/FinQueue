@@ -6,7 +6,7 @@ from django.contrib.auth.models import User
 from django.test import TestCase, override_settings
 from django.utils import timezone
 
-from apps.jobs.models import Job
+from apps.jobs.models import Job, JobHistory
 from apps.worker.engine import WorkerEngine
 from apps.worker.handlers import dispatch_job, get_external_operation_id
 from apps.worker.recovery import recover_stale_running_jobs
@@ -55,6 +55,11 @@ class WorkerRetryTests(TestCase):
         self.assertEqual(job.failure_reason, 'gateway timeout')
         self.assertEqual(Job.objects.filter(source_job=job).count(), 0)
 
+        history = JobHistory.objects.filter(job=job).latest('created_at')
+        self.assertEqual(history.status, Job.Status.PENDING)
+        self.assertEqual(history.retry_count, 1)
+        self.assertIn('gateway timeout', history.message)
+
     def test_completed_refund_creates_webhook_and_notification_jobs(self):
         user = User.objects.create_user(username='refund-success')
         job = Job.objects.create(
@@ -83,6 +88,19 @@ class WorkerRetryTests(TestCase):
 
         self.assertEqual(job.status, Job.Status.COMPLETED)
         self.assertEqual(follow_ups.count(), 2)
+        self.assertTrue(
+            JobHistory.objects.filter(
+                job=job,
+                status=Job.Status.COMPLETED,
+            ).exists()
+        )
+        self.assertEqual(
+            JobHistory.objects.filter(
+                job__source_job=job,
+                status=Job.Status.PENDING,
+            ).count(),
+            2,
+        )
 
         webhook = follow_ups.get(job_type=Job.JobType.WEBHOOK_DELIVERY)
         notification = follow_ups.get(job_type=Job.JobType.SEND_NOTIFICATION)
@@ -121,6 +139,10 @@ class WorkerRetryTests(TestCase):
 
         self.assertEqual(job.status, Job.Status.DEAD)
         self.assertEqual(follow_ups.count(), 2)
+        dead_history = JobHistory.objects.filter(job=job).latest('created_at')
+        self.assertEqual(dead_history.status, Job.Status.DEAD)
+        self.assertEqual(dead_history.retry_count, 3)
+        self.assertIn('refund provider unavailable', dead_history.message)
 
         webhook = follow_ups.get(job_type=Job.JobType.WEBHOOK_DELIVERY)
         notification = follow_ups.get(job_type=Job.JobType.SEND_NOTIFICATION)
@@ -406,6 +428,9 @@ class StaleJobRecoveryTests(TestCase):
             str(job.id),
             self.redis.sorted_sets[settings.FINQUEUE_JOBS_KEY],
         )
+        history = JobHistory.objects.filter(job=job).latest('created_at')
+        self.assertEqual(history.status, Job.Status.PENDING)
+        self.assertIn('previous external attempt outcome may be unknown', history.message)
 
     def test_running_job_under_30_seconds_is_not_recovered(self):
         now = timezone.now()
