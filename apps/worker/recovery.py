@@ -7,7 +7,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from apps.jobs.models import Job
-from apps.jobs.services import enqueue_job
+from apps.jobs.services import enqueue_job, record_job_history
 from core.redis_client import get_redis_client
 
 logger = logging.getLogger(__name__)
@@ -81,9 +81,9 @@ def recover_stale_running_jobs(redis_client=None, now=None):
                     'updated_at',
                 )
             )
+            record_job_history(job, message=job.failure_reason)
 
-            enqueue_job(job, redis_client=redis_client)
-
+        enqueue_job(job, redis_client=redis_client)
         recovered_count += 1
         logger.warning(
             'Recovered stale RUNNING job %s back to PENDING.',
