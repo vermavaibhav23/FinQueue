@@ -25,8 +25,7 @@ It demonstrates:
 
 The active design intentionally keeps persistence small:
 
-- `jobs` — current asynchronous job state, payload, retries, result, and failure data
-- `idempotency_requests` — Layer 1 merchant request idempotency
+- `jobs` — asynchronous job state plus Layer 1 submission idempotency metadata
 - `dead_letter_queue` — jobs that exhausted retries
 
 The old `transactions` model/table was removed because it duplicated information
@@ -48,10 +47,11 @@ their own work by sending a higher priority.
 FinQueue now demonstrates all three idempotency layers discussed in the design:
 
 1. **Merchant/API submission idempotency** — every external job submission must
-   include an `Idempotency-Key`. FinQueue stores `user + idempotency_key +
-   request_hash + job` in a separate `idempotency_requests` table. The same
-   key and same payload return the existing job; the same key with a different
-   payload returns `409 Conflict`.
+   include an `Idempotency-Key`. FinQueue stores `idempotency_key` and the
+   SHA-256 `request_hash` directly on the submitted `jobs` row, with
+   `UNIQUE(user, idempotency_key)`. The same key and same payload return the
+   existing job; the same key with a different payload returns `409 Conflict`.
+   Internally generated follow-up jobs leave these fields `NULL`.
 2. **Follow-up job creation idempotency** — internally generated webhook and
    notification jobs are protected by
    `UNIQUE(source_job, job_type, source_event)`.
