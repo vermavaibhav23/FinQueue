@@ -3,7 +3,7 @@ from django.test import TestCase
 from django.utils import timezone
 from rest_framework.test import APIClient, APIRequestFactory
 
-from apps.jobs.models import IdempotencyRequest, Job
+from apps.jobs.models import Job
 from apps.jobs.serializers import JobSubmitSerializer
 from apps.jobs.services import calculate_priority_score
 
@@ -164,7 +164,10 @@ class JobSubmissionIdempotencyTests(TestCase):
         self.assertFalse(first.json()['idempotent_replay'])
         self.assertTrue(second.json()['idempotent_replay'])
         self.assertEqual(Job.objects.count(), 1)
-        self.assertEqual(IdempotencyRequest.objects.count(), 1)
+
+        job = Job.objects.get()
+        self.assertEqual(job.idempotency_key, 'refund-1001')
+        self.assertEqual(len(job.request_hash), 64)
 
     def test_same_key_with_different_request_is_rejected(self):
         from unittest.mock import patch
@@ -194,7 +197,35 @@ class JobSubmissionIdempotencyTests(TestCase):
         self.assertEqual(first.status_code, 202)
         self.assertEqual(second.status_code, 409)
         self.assertEqual(Job.objects.count(), 1)
-        self.assertEqual(IdempotencyRequest.objects.count(), 1)
+
+    def test_same_key_is_allowed_for_different_users(self):
+        from unittest.mock import patch
+
+        other_user = User.objects.create_user(
+            username='other-merchant',
+            password='password123',
+        )
+
+        with patch('apps.jobs.views.check_job_submission_rate_limit'):
+            first = self.client.post(
+                self.url,
+                self.payload,
+                format='json',
+                HTTP_IDEMPOTENCY_KEY='refund-1001',
+            )
+
+            self.client.force_authenticate(other_user)
+            second = self.client.post(
+                self.url,
+                self.payload,
+                format='json',
+                HTTP_IDEMPOTENCY_KEY='refund-1001',
+            )
+
+        self.assertEqual(first.status_code, 202)
+        self.assertEqual(second.status_code, 202)
+        self.assertNotEqual(first.json()['id'], second.json()['id'])
+        self.assertEqual(Job.objects.count(), 2)
 
     def test_missing_idempotency_key_is_rejected(self):
         response = self.client.post(
