@@ -34,8 +34,8 @@ already available in the job workflow and was not used by the current handlers.
 
 The `job_history` table is intentionally small. Each row stores the job,
 its status at that moment, retry count, an optional message, and a timestamp.
-The worker appends history rows when a job starts, retries, completes, or becomes
-dead. Stale recovery and DLQ requeue also append rows. The main `jobs` table
+The worker appends history rows when a job starts, fails, becomes due for retry,
+completes, or becomes dead. Stale recovery and DLQ requeue also append rows. The main `jobs` table
 therefore answers "what is the job's current state?", while `job_history`
 answers "what happened to this job over time?".
 
@@ -220,6 +220,39 @@ Worker `result` JSON is also kept focused on the actual outcome:
 
 Stable Layer 3 idempotency/event IDs are used for the outbound external call
 but are not duplicated inside the final `result` JSON.
+
+## Retry state lifecycle
+
+A retryable failure is now represented explicitly in MySQL:
+
+```text
+PENDING
+  |
+  v
+RUNNING
+  |
+  | handler fails and retries remain
+  v
+FAILED
+  |
+  | job_id waits in Redis retry sorted set
+  | score = retry_at timestamp
+  v
+retry becomes due
+  |
+  v
+PENDING
+  |
+  | job_id moves to the main Redis priority queue
+  v
+RUNNING
+```
+
+The worker checks the retry sorted set before picking from the main queue. When
+`retry_at <= now`, the job is changed from `FAILED` to `PENDING`, a
+`PENDING` history row is appended, and the same job ID is placed back into the
+main priority sorted set. If all retries are exhausted, the job becomes
+`DEAD` and a DLQ entry is created.
 
 ## Worker crash recovery
 
