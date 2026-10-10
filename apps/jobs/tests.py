@@ -3,7 +3,7 @@ from django.test import TestCase
 from django.utils import timezone
 from rest_framework.test import APIClient, APIRequestFactory
 
-from apps.jobs.models import Job
+from apps.jobs.models import Job, JobHistory
 from apps.jobs.serializers import JobSubmitSerializer
 from apps.jobs.services import calculate_priority_score
 
@@ -168,6 +168,10 @@ class JobSubmissionIdempotencyTests(TestCase):
         job = Job.objects.get()
         self.assertEqual(job.idempotency_key, 'refund-1001')
         self.assertEqual(len(job.request_hash), 64)
+        history = JobHistory.objects.get(job=job)
+        self.assertEqual(history.status, Job.Status.PENDING)
+        self.assertEqual(history.retry_count, 0)
+        self.assertEqual(history.message, 'Job created.')
 
     def test_same_key_with_different_request_is_rejected(self):
         from unittest.mock import patch
