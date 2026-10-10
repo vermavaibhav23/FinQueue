@@ -260,8 +260,11 @@ For Layer 3 external idempotency, these IDs appear at different boundaries:
 
 ### On terminal refund failure
 
-Temporary failures are retried after 2, 4, and 8 seconds. After retries are
-exhausted, the refund becomes `dead` and FinQueue internally creates:
+Temporary failures are retried after 2, 4, and 8 seconds. While waiting for
+the next retry, the Job status is `failed`. When the retry timestamp becomes
+due, the worker changes it back to `pending` and moves its ID into the main
+Redis queue. After retries are exhausted, the refund becomes `dead` and
+FinQueue internally creates:
 
 ```text
 webhook_delivery    priority=medium    event=refund.failed
@@ -421,14 +424,19 @@ python .\worker.py
 
 The normal worker:
 
-1. Promotes due retry jobs into the main Redis queue.
-2. Pops one job with the lowest score (high before medium before low).
-3. Marks it `running` and records `started_at`.
-4. Dispatches the matching handler.
-5. Marks success as completed.
-6. Retries temporary failures with exponential backoff.
-7. Moves a job to the DLQ after its final failed attempt.
-8. If the terminal job is a refund, creates webhook + notification follow-ups.
+1. Checks the Redis retry sorted set for jobs whose `retry_at <= now`.
+2. Changes each due retry from `failed` to `pending`, records `PENDING`
+   history, and moves its job ID into the main Redis priority sorted set.
+3. Pops one job with the lowest score (high before medium before low).
+4. Marks it `running` and records `RUNNING` history.
+5. Dispatches the matching handler.
+6. Marks success as `completed` and records `COMPLETED` history.
+7. On a retryable failure, increments `retry_count`, marks the job `failed`,
+   records `FAILED` history, and puts the job ID into the retry sorted set
+   using the retry timestamp as the score.
+8. After the final failed attempt, marks the job `dead`, records `DEAD`
+   history, and creates a DLQ entry.
+9. If a terminal job is a refund, creates webhook + notification follow-ups.
 
 Webhook or notification terminal states do not create additional follow-ups.
 
