@@ -83,3 +83,25 @@ class Job(models.Model):
 
     def __str__(self):
         return f'{self.job_type} [{self.status}]'
+
+
+class JobHistory(models.Model):
+    job = models.ForeignKey(
+        Job,
+        on_delete=models.CASCADE,
+        related_name='history',
+    )
+    status = models.CharField(max_length=16, choices=Job.Status.choices)
+    retry_count = models.PositiveSmallIntegerField(default=0)
+    message = models.TextField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'job_history'
+        ordering = ('created_at',)
+        indexes = [
+            models.Index(fields=('job', 'created_at')),
+        ]
+
+    def __str__(self):
+        return f'{self.job_id} -> {self.status}'
