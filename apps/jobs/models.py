@@ -44,6 +44,16 @@ class Job(models.Model):
         default=Status.PENDING,
     )
     payload = models.JSONField()
+    idempotency_key = models.CharField(
+        max_length=128,
+        null=True,
+        blank=True,
+    )
+    request_hash = models.CharField(
+        max_length=64,
+        null=True,
+        blank=True,
+    )
     retry_count = models.PositiveSmallIntegerField(default=0)
     result = models.JSONField(null=True, blank=True)
     failure_reason = models.TextField(null=True, blank=True)
@@ -62,6 +72,10 @@ class Job(models.Model):
         ]
         constraints = [
             models.UniqueConstraint(
+                fields=('user', 'idempotency_key'),
+                name='unique_job_user_idempotency_key',
+            ),
+            models.UniqueConstraint(
                 fields=('source_job', 'job_type', 'source_event'),
                 name='unique_follow_up_per_source_event',
             ),
@@ -69,32 +83,3 @@ class Job(models.Model):
 
     def __str__(self):
         return f'{self.job_type} [{self.status}]'
-
-
-class IdempotencyRequest(models.Model):
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    user = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        on_delete=models.CASCADE,
-        related_name='idempotency_requests',
-    )
-    idempotency_key = models.CharField(max_length=128)
-    request_hash = models.CharField(max_length=64)
-    job = models.OneToOneField(
-        Job,
-        on_delete=models.CASCADE,
-        related_name='idempotency_request',
-    )
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        db_table = 'idempotency_requests'
-        constraints = [
-            models.UniqueConstraint(
-                fields=('user', 'idempotency_key'),
-                name='unique_user_idempotency_key',
-            ),
-        ]
-
-    def __str__(self):
-        return f'{self.user_id}:{self.idempotency_key}'
