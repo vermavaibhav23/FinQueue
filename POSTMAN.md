@@ -97,95 +97,253 @@ valid until it expires.
 
 ## Jobs
 
-Valid job types are:
+Server-assigned priorities are:
 
-- `process_payment`
-- `fraud_check`
-- `send_notification`
+- `refund_processing` -> high
+- `webhook_delivery` -> medium
+- `send_notification` -> low
 
-Valid priorities are `high`, `medium`, and `low`. Fraud checks are always forced
-to high priority, notifications to low priority, and payments default to medium
-when priority is omitted.
+The client does not choose priority.
 
-### Submit a payment job
+## Normal flow: submit only the refund job
+
+The normal project flow starts with one `refund_processing` request. When it
+reaches `completed` or `dead`, FinQueue automatically creates the appropriate
+webhook and notification jobs.
 
 ```http
 POST {{base_url}}/jobs/submit/
 Authorization: Bearer {{access_token}}
+Idempotency-Key: refund-1001
 Content-Type: application/json
 ```
 
 ```json
 {
-  "job_type": "process_payment",
-  "priority": "medium",
+  "job_type": "refund_processing",
   "payload": {
+    "transaction_id": "txn-1001",
     "amount": "1000.00",
-    "merchant": "Demo Store",
     "currency": "INR",
-    "device_id": "device-123",
-    "location": "Chennai"
+    "webhook_url": "https://merchant.example/webhooks",
+    "notification": {
+      "channel": "email",
+      "recipient": "customer@example.com"
+    }
   }
 }
 ```
 
-Successful response (`201 Created`):
+Successful response (`202 Accepted`):
 
 ```json
 {
   "id": "12f18c85-b610-4bf6-9fd9-1b5a9c645e78",
-  "job_type": "process_payment",
-  "priority": "medium",
   "status": "pending",
-  "queue_score": 2.1770000000,
-  "created_at": "2026-07-06T10:00:00Z"
+  "idempotent_replay": false
 }
 ```
 
-The queue score is illustrative and varies with creation time. Submission is
-limited to 10 jobs per user per 60 seconds by default.
+The API has accepted the job; the worker will complete it later.
 
-### Submit a fraud-check job
+### Merchant/API idempotency
 
-```http
-POST {{base_url}}/jobs/submit/
-Authorization: Bearer {{access_token}}
-Content-Type: application/json
+`Idempotency-Key` is required on job submission.
+
+- same merchant + same key + same payload -> return the existing job
+- same merchant + same key + different payload -> `409 Conflict`
+- new key -> create a new job
+
+FinQueue stores the `idempotency_key` and SHA-256 `request_hash` directly
+on the submitted `jobs` row. The database enforces
+`UNIQUE(user, idempotency_key)`, so the same key can be reused by a different
+authenticated user without collision. Internally generated follow-up jobs leave
+these fields `NULL`. An idempotent replay returns `200 OK` with
+`"idempotent_replay": true`.
+
+This is separate from follow-up idempotency, which uses
+`UNIQUE(source_job, job_type, source_event)`.
+
+### External side-effect idempotency
+
+FinQueue also sends a stable downstream idempotency/event ID on every retry of
+the same logical external action:
+
+- refund provider: `Idempotency-Key: refund:<job_uuid>`
+- webhook: stable `event_id` such as `webhook:refund.completed:<refund_job_uuid>`
+- notification provider: stable `notification_id`
+
+If a worker crashes after the external system processed the request but before
+FinQueue saved `COMPLETED`, stale-job recovery may retry the job. The retry
+reuses the same stable ID. The receiving payment gateway, merchant backend, or
+notification provider must honor that ID and deduplicate the operation.
+
+### On refund success
+
+The refund becomes `completed` and FinQueue internally creates:
+
+```text
+webhook_delivery    priority=medium    event=refund.completed
+send_notification   priority=low       success message
 ```
+
+Both follow-up jobs have `source_job` set to the original refund job and
+`source_event` set to `refund.completed`.
+
+Example generated webhook payload:
 
 ```json
 {
-  "job_type": "fraud_check",
-  "payload": {
-    "amount": "75000.00",
-    "merchant": "Demo Store",
-    "device_id": "new-device",
-    "location": "Chennai"
+  "url": "https://merchant.example/webhooks",
+  "event": "refund.completed",
+  "event_id": "webhook:refund.completed:12f18c85-b610-4bf6-9fd9-1b5a9c645e78",
+  "data": {
+    "source_job_id": "12f18c85-b610-4bf6-9fd9-1b5a9c645e78",
+    "transaction_id": "txn-1001",
+    "refund_id": "refund-12f18c85",
+    "amount": "1000.00",
+    "currency": "INR",
+    "status": "completed"
   }
 }
 ```
 
-### Submit a notification job
+Example generated notification payload:
 
-```http
-POST {{base_url}}/jobs/submit/
-Authorization: Bearer {{access_token}}
-Content-Type: application/json
+```json
+{
+  "channel": "email",
+  "recipient": "customer@example.com",
+  "message": "Your refund of 1000.00 INR has been processed.",
+  "notification_id": "notification:refund.completed:12f18c85-b610-4bf6-9fd9-1b5a9c645e78"
+}
 ```
+
+Worker result JSON is intentionally concise:
+
+```json
+// refund_processing result
+{
+  "refund_id": "refund-12f18c85",
+  "transaction_id": "txn-1001",
+  "status": "REFUNDED",
+  "amount": "1000.00",
+  "currency": "INR"
+}
+
+// webhook_delivery result
+{
+  "webhook_delivery_status": "DELIVERED",
+  "http_status": 200
+}
+
+// send_notification result
+{
+  "notification_status": "SENT",
+  "channel": "email"
+}
+```
+
+External idempotency IDs are used while making the outbound call and are not
+duplicated in `Job.result`.
+
+For Layer 3 external idempotency, these IDs appear at different boundaries:
+
+- the initial merchant -> FinQueue refund request does **not** contain an external
+  event ID; FinQueue creates the refund job first
+- when the refund worker calls a real payment provider, it would send
+  `Idempotency-Key: refund:<refund_job_uuid>` as an outbound request header
+- the internally generated webhook job stores `event_id` in its payload and
+  the outbound webhook body includes that same `event_id`
+- the internally generated notification job stores `notification_id` in its
+  payload and a real notification provider would receive that same stable ID
+
+### On terminal refund failure
+
+Temporary failures are retried after 2, 4, and 8 seconds. While waiting for
+the next retry, the Job status is `failed`. When the retry timestamp becomes
+due, the worker changes it back to `pending` and moves its ID into the main
+Redis queue. After retries are exhausted, the refund becomes `dead` and
+FinQueue internally creates:
+
+```text
+webhook_delivery    priority=medium    event=refund.failed
+send_notification   priority=low       failure message
+```
+
+The failed webhook contains the final `failure_reason`.
+
+Follow-up creation is idempotent per terminal event: at most one webhook and
+one notification job are created for each `source_job + source_event` pair.
+
+## Direct webhook/notification submission
+
+The API still accepts these job types directly for isolated testing, but the
+normal business flow creates them automatically from a terminal refund.
+
+### Webhook test
+
+```json
+{
+  "job_type": "webhook_delivery",
+  "payload": {
+    "url": "https://merchant.example/webhooks",
+    "event": "refund.completed",
+    "data": {
+      "refund_id": "refund-123"
+    }
+  }
+}
+```
+
+### Notification test
 
 ```json
 {
   "job_type": "send_notification",
   "payload": {
-    "status": "SUCCESS",
-    "amount": "1000.00",
-    "merchant": "Demo Store",
-    "transaction_id": "demo-transaction"
+    "channel": "email",
+    "recipient": "customer@example.com",
+    "message": "Your refund has been processed."
   }
 }
 ```
 
-### List the current user's jobs
+## Simulate provider failure
+
+The dummy handlers randomly fail by default to mimic unreliable external
+services:
+
+- refund: 20% failure chance
+- webhook: 15% failure chance
+- notification: 10% failure chance
+
+Add `simulate_failure: true` to a valid handler payload when you want to force
+a deterministic failure and exercise retry/DLQ behavior.
+
+For example, to force the refund itself to fail on every attempt:
+
+```json
+{
+  "job_type": "refund_processing",
+  "payload": {
+    "transaction_id": "txn-1001",
+    "amount": "1000.00",
+    "currency": "INR",
+    "webhook_url": "https://merchant.example/webhooks",
+    "notification": {
+      "channel": "email",
+      "recipient": "customer@example.com"
+    },
+    "simulate_failure": true
+  }
+}
+```
+
+After the final retry fails, the refund becomes `dead`, then its
+`refund.failed` webhook and failure notification are queued.
+
+## List jobs
 
 ```http
 GET {{base_url}}/jobs/
@@ -196,56 +354,65 @@ Optional filters:
 
 ```text
 /jobs/?status=pending
-/jobs/?job_type=process_payment
-/jobs/?status=completed&job_type=fraud_check
+/jobs/?job_type=refund_processing
+/jobs/?status=completed&job_type=webhook_delivery
 ```
 
 The current configuration does not enable pagination, so the response is a JSON
 array.
 
-### Retrieve a job
+## Retrieve a job
 
 ```http
 GET {{base_url}}/jobs/{{job_id}}/
 Authorization: Bearer {{access_token}}
 ```
 
-Example response:
+Follow-up jobs include the original refund UUID in `source_job` and the
+triggering terminal event in `source_event`.
+
+Example completed refund:
 
 ```json
 {
   "id": "12f18c85-b610-4bf6-9fd9-1b5a9c645e78",
-  "job_type": "process_payment",
-  "priority": "medium",
+  "source_job": null,
+  "job_type": "refund_processing",
+  "priority": "high",
   "status": "completed",
   "payload": {
+    "transaction_id": "txn-1001",
     "amount": "1000.00",
-    "merchant": "Demo Store"
+    "currency": "INR",
+    "webhook_url": "https://merchant.example/webhooks",
+    "notification": {
+      "channel": "email",
+      "recipient": "customer@example.com"
+    }
   },
   "retry_count": 0,
   "result": {
-    "transaction_id": "33661c14-c3f7-4a72-8943-a317f6808423",
-    "status": "SUCCESS",
+    "refund_id": "refund-12f18c85",
+    "transaction_id": "txn-1001",
+    "status": "REFUNDED",
     "amount": "1000.00",
-    "merchant": "Demo Store",
     "currency": "INR"
   },
-  "failure_reason": null,
-  "created_at": "2026-07-06T10:00:00Z",
-  "updated_at": "2026-07-06T10:00:02Z",
-  "started_at": "2026-07-06T10:00:00Z",
-  "completed_at": "2026-07-06T10:00:02Z"
+  "failure_reason": null
 }
 ```
 
-### Cancel a pending job
+## Cancel a pending job
 
 ```http
 DELETE {{base_url}}/jobs/{{job_id}}/
 Authorization: Bearer {{access_token}}
 ```
 
-Only pending jobs can be deleted. A successful deletion returns `204 No Content`.
+Only a `pending` job that has **never started** can be deleted. A recovered
+stale job may be `pending` again but still has `started_at`, so deletion is
+rejected because an external side effect may already have happened. A successful
+deletion of a never-started job returns `204 No Content`.
 
 ## Worker behavior
 
@@ -255,37 +422,54 @@ Run the worker in another terminal:
 python .\worker.py
 ```
 
-The worker:
+The normal worker:
 
-1. Promotes due retry jobs into the main Redis queue.
-2. Pops one job with the lowest priority score.
-3. Marks it as running and executes its handler.
-4. Marks success as completed.
-5. On an exception, schedules retries after 2, 4, and 8 seconds.
-6. Moves the job to the dead-letter queue after the final failed attempt.
+1. Checks the Redis retry sorted set for jobs whose `retry_at <= now`.
+2. Changes each due retry from `failed` to `pending`, records `PENDING`
+   history, and moves its job ID into the main Redis priority sorted set.
+3. Pops one job with the lowest score (high before medium before low).
+4. Marks it `running` and records `RUNNING` history.
+5. Dispatches the matching handler.
+6. Marks success as `completed` and records `COMPLETED` history.
+7. On a retryable failure, increments `retry_count`, marks the job `failed`,
+   records `FAILED` history, and puts the job ID into the retry sorted set
+   using the retry timestamp as the score.
+8. After the final failed attempt, marks the job `dead`, records `DEAD`
+   history, and creates a DLQ entry.
+9. If a terminal job is a refund, creates webhook + notification follow-ups.
 
-The payment handler waits two seconds and simulates an 80% success rate.
+Webhook or notification terminal states do not create additional follow-ups.
+
+Run the separate stale-job recovery process in another terminal:
+
+```powershell
+python .\recovery_worker.py
+```
+
+The recovery process treats a job as stale when it has remained `RUNNING`
+for more than 30 seconds based on `started_at`. It changes that job back to
+`PENDING` and re-enqueues the same job ID. The retried handler then sends the
+same external idempotency/event ID again.
+
+This fixed threshold is intentionally simple for the project. A lease +
+heartbeat design is kept as a future production enhancement for cases where a
+legitimate job may run longer than the threshold.
 
 ## Dead-letter queue
 
 These endpoints require a staff/superuser account.
-
-### List DLQ entries
 
 ```http
 GET {{base_url}}/dlq/
 Authorization: Bearer {{admin_access_token}}
 ```
 
-### Requeue an entry
+Requeue an entry:
 
 ```http
 POST {{base_url}}/dlq/{{dlq_id}}/requeue/
 Authorization: Bearer {{admin_access_token}}
 ```
-
-This resets the original job to pending, clears its execution state, and adds it
-to the main Redis queue.
 
 ## Metrics
 
@@ -298,37 +482,11 @@ GET {{base_url}}/metrics/summary/
 Authorization: Bearer {{access_token}}
 ```
 
-```json
-{
-  "total_jobs": 5,
-  "pending": 1,
-  "running": 0,
-  "completed": 3,
-  "failed": 0,
-  "dead": 1
-}
-```
-
 ### Counts by job type
 
 ```http
 GET {{base_url}}/metrics/job-types/
 Authorization: Bearer {{access_token}}
-```
-
-```json
-{
-  "job_types": [
-    {
-      "job_type": "fraud_check",
-      "total": 2
-    },
-    {
-      "job_type": "process_payment",
-      "total": 3
-    }
-  ]
-}
 ```
 
 ### Failure rate
@@ -338,13 +496,5 @@ GET {{base_url}}/metrics/failure-rate/
 Authorization: Bearer {{access_token}}
 ```
 
-```json
-{
-  "total_jobs": 5,
-  "failed_jobs": 1,
-  "failure_rate_percent": 20.0
-}
-```
-
-In the current implementation, terminal worker failures use the `dead` status.
-The failure-rate endpoint counts both `failed` and `dead` statuses.
+Terminal worker failures use the `dead` status. The failure-rate endpoint counts
+both `failed` and `dead` statuses.

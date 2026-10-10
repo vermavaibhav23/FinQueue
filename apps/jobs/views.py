@@ -1,3 +1,7 @@
+import hashlib
+import json
+
+from django.db import IntegrityError, transaction
 from rest_framework import generics, status
 from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import IsAuthenticated
@@ -6,7 +10,7 @@ from rest_framework.response import Response
 from .models import Job
 from .rate_limits import check_job_submission_rate_limit
 from .serializers import JobSerializer, JobSubmitSerializer
-from .services import enqueue_job, remove_job_from_queues
+from .services import enqueue_job, record_job_history, remove_job_from_queues
 
 
 class JobSubmitView(generics.CreateAPIView):
@@ -14,22 +18,96 @@ class JobSubmitView(generics.CreateAPIView):
     permission_classes = (IsAuthenticated,)
 
     def create(self, request, *args, **kwargs):
-        check_job_submission_rate_limit(request.user)
+        idempotency_key = request.headers.get('Idempotency-Key', '').strip()
+
+        if not idempotency_key:
+            raise ValidationError(
+                {'idempotency_key': 'Idempotency-Key header is required.'}
+            )
+
+        if len(idempotency_key) > 128:
+            raise ValidationError(
+                {'idempotency_key': 'Idempotency-Key must be at most 128 characters.'}
+            )
+
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        job = serializer.save()
-        queue_score = enqueue_job(job)
 
+        request_hash = self._request_hash(serializer.validated_data)
+
+        existing = Job.objects.filter(
+            user=request.user,
+            idempotency_key=idempotency_key,
+        ).first()
+
+        if existing is not None:
+            return self._replay_or_conflict(existing, request_hash)
+
+        check_job_submission_rate_limit(request.user)
+
+        try:
+            with transaction.atomic():
+                job = serializer.save(
+                    idempotency_key=idempotency_key,
+                    request_hash=request_hash,
+                )
+                record_job_history(job, message='Job created.')
+                transaction.on_commit(lambda: enqueue_job(job))
+        except IntegrityError:
+            # Another request with the same user + idempotency key may have won
+            # the race. The database uniqueness constraint decides the winner.
+            existing = Job.objects.get(
+                user=request.user,
+                idempotency_key=idempotency_key,
+            )
+            return self._replay_or_conflict(existing, request_hash)
+
+        return self._job_response(
+            job,
+            status_code=status.HTTP_202_ACCEPTED,
+            idempotent_replay=False,
+        )
+
+    @staticmethod
+    def _request_hash(validated_data):
+        canonical_body = {
+            'job_type': validated_data['job_type'],
+            'payload': validated_data['payload'],
+        }
+        canonical_json = json.dumps(
+            canonical_body,
+            sort_keys=True,
+            separators=(',', ':'),
+            ensure_ascii=False,
+        )
+        return hashlib.sha256(canonical_json.encode('utf-8')).hexdigest()
+
+    def _replay_or_conflict(self, existing_job, request_hash):
+        if existing_job.request_hash != request_hash:
+            return Response(
+                {
+                    'detail': (
+                        'This Idempotency-Key was already used with a different request.'
+                    )
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        return self._job_response(
+            existing_job,
+            status_code=status.HTTP_200_OK,
+            idempotent_replay=True,
+        )
+
+    @staticmethod
+    def _job_response(job, status_code, idempotent_replay):
         return Response(
             {
                 'id': job.id,
-                'job_type': job.job_type,
-                'priority': job.priority,
                 'status': job.status,
-                'queue_score': queue_score,
-                'created_at': job.created_at,
+                'idempotent_replay': idempotent_replay,
             },
-            status=status.HTTP_201_CREATED,
+            status=status_code,
         )
 
 
@@ -61,8 +139,13 @@ class JobDetailView(generics.RetrieveDestroyAPIView):
         return Job.objects.filter(user=self.request.user)
 
     def perform_destroy(self, instance):
-        if instance.status != Job.Status.PENDING:
-            raise ValidationError('Only pending jobs can be cancelled.')
+        # A recovered stale job is PENDING again, but it may already have caused
+        # an external side effect before its old worker crashed. Never hard-delete
+        # a job that has already started at least once.
+        if instance.status != Job.Status.PENDING or instance.started_at is not None:
+            raise ValidationError(
+                'Only pending jobs that have never started can be cancelled.'
+            )
 
         remove_job_from_queues(instance.id)
         instance.delete()

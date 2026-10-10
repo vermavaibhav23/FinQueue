@@ -3,7 +3,7 @@ from django.test import TestCase
 
 from apps.dlq.models import DeadLetterQueue
 from apps.dlq.services import requeue_dead_letter_job
-from apps.jobs.models import Job
+from apps.jobs.models import Job, JobHistory
 
 
 class FakeRedis:
@@ -19,12 +19,12 @@ class DeadLetterQueueTests(TestCase):
         user = User.objects.create_user(username='admin')
         job = Job.objects.create(
             user=user,
-            job_type=Job.JobType.PROCESS_PAYMENT,
-            priority=Job.Priority.MEDIUM,
+            job_type=Job.JobType.REFUND_PROCESSING,
+            priority=Job.Priority.HIGH,
             status=Job.Status.DEAD,
             retry_count=3,
-            payload={'amount': 1000},
-            failure_reason='gateway failed',
+            payload={'transaction_id': 'txn-1', 'amount': 1000},
+            failure_reason='refund provider failed',
         )
         dlq_entry = DeadLetterQueue.objects.create(
             original_job=job,
@@ -39,3 +39,8 @@ class DeadLetterQueueTests(TestCase):
         self.assertEqual(requeued_job.status, Job.Status.PENDING)
         self.assertEqual(requeued_job.retry_count, 0)
         self.assertIsNone(requeued_job.failure_reason)
+
+        history = JobHistory.objects.filter(job=job).latest('created_at')
+        self.assertEqual(history.status, Job.Status.PENDING)
+        self.assertEqual(history.retry_count, 0)
+        self.assertEqual(history.message, 'Requeued from dead-letter queue.')

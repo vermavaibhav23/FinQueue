@@ -9,7 +9,9 @@ from apps.dlq.services import move_to_dead_letter_queue
 from apps.jobs.models import Job
 from apps.jobs.services import (
     calculate_retry_delay,
+    create_refund_follow_up_jobs,
     promote_due_retries,
+    record_job_history,
     schedule_retry,
 )
 from apps.worker.handlers import dispatch_job
@@ -64,6 +66,7 @@ class WorkerEngine:
             job.status = Job.Status.RUNNING
             job.started_at = timezone.now()
             job.save(update_fields=('status', 'started_at', 'updated_at'))
+            record_job_history(job, message='Worker started processing.')
 
         try:
             result = self.handle_job(job)
@@ -77,40 +80,50 @@ class WorkerEngine:
         return dispatch_job(job)
 
     def mark_completed(self, job, result):
-        job.status = Job.Status.COMPLETED
-        job.result = result
-        job.completed_at = timezone.now()
-        job.failure_reason = None
-        job.save(
-            update_fields=(
-                'status',
-                'result',
-                'completed_at',
-                'failure_reason',
-                'updated_at',
-            )
-        )
-        logger.info('Completed job %s.', job.id)
-
-    def mark_failed(self, job, failure_reason):
-        if job.retry_count < settings.FINQUEUE_MAX_RETRIES:
-            job.retry_count += 1
-            delay_seconds = calculate_retry_delay(job.retry_count)
-            job.status = Job.Status.PENDING
-            job.failure_reason = failure_reason
-            job.completed_at = None
+        with transaction.atomic():
+            job.status = Job.Status.COMPLETED
+            job.result = result
+            job.completed_at = timezone.now()
+            job.failure_reason = None
             job.save(
                 update_fields=(
                     'status',
-                    'retry_count',
-                    'failure_reason',
+                    'result',
                     'completed_at',
+                    'failure_reason',
                     'updated_at',
                 )
             )
+            record_job_history(job, message='Job completed successfully.')
+
+        logger.info('Completed job %s.', job.id)
+        self._enqueue_terminal_follow_ups(job)
+
+    def mark_failed(self, job, failure_reason):
+        if job.retry_count < settings.FINQUEUE_MAX_RETRIES:
+            with transaction.atomic():
+                job.retry_count += 1
+                delay_seconds = calculate_retry_delay(job.retry_count)
+                job.status = Job.Status.FAILED
+                job.failure_reason = failure_reason
+                job.completed_at = None
+                job.save(
+                    update_fields=(
+                        'status',
+                        'retry_count',
+                        'failure_reason',
+                        'completed_at',
+                        'updated_at',
+                    )
+                )
+                record_job_history(
+                    job,
+                    message=f'Attempt failed: {failure_reason}',
+                )
+
             retry_at = schedule_retry(job, delay_seconds, self.redis_client)
             logger.warning(
-                'Retrying job %s in %s seconds at %s.',
+                'Job %s failed; retry scheduled in %s seconds at %s.',
                 job.id,
                 delay_seconds,
                 retry_at,
@@ -124,4 +137,27 @@ class WorkerEngine:
             dlq_entry.id,
             job.retry_count,
             failure_reason,
+        )
+        self._enqueue_terminal_follow_ups(job)
+
+    def _enqueue_terminal_follow_ups(self, job):
+        if job.job_type != Job.JobType.REFUND_PROCESSING:
+            return
+
+        try:
+            follow_up_jobs = create_refund_follow_up_jobs(
+                job,
+                redis_client=self.redis_client,
+            )
+        except Exception:
+            logger.exception(
+                'Could not create follow-up jobs for refund job %s.',
+                job.id,
+            )
+            return
+
+        logger.info(
+            'Created/queued %s follow-up jobs for refund job %s.',
+            len(follow_up_jobs),
+            job.id,
         )

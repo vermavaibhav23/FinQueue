@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import Job, Transaction
+from .models import Job, JobHistory
 
 
 @admin.register(Job)
@@ -11,26 +11,31 @@ class JobAdmin(admin.ModelAdmin):
         'job_type',
         'priority',
         'status',
+        'idempotency_key',
         'retry_count',
         'created_at',
     )
     list_filter = ('job_type', 'priority', 'status')
-    search_fields = ('id', 'user__username')
+    search_fields = ('id', 'user__username', 'idempotency_key')
     readonly_fields = ('id', 'created_at', 'updated_at')
 
 
-@admin.register(Transaction)
-class TransactionAdmin(admin.ModelAdmin):
+@admin.register(JobHistory)
+class JobHistoryAdmin(admin.ModelAdmin):
     list_display = (
         'id',
         'job',
-        'user',
-        'amount',
-        'merchant',
         'status',
-        'risk_score',
-        'processed_at',
+        'retry_count',
+        'message',
+        'created_at',
     )
-    list_filter = ('status', 'currency')
-    search_fields = ('id', 'job__id', 'user__username', 'merchant')
-    readonly_fields = ('id', 'processed_at')
+    list_filter = ('status',)
+    search_fields = ('job__id', 'job__user__username', 'message')
+    readonly_fields = (
+        'job',
+        'status',
+        'retry_count',
+        'message',
+        'created_at',
+    )

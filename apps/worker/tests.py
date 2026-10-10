@@ -1,8 +1,16 @@
+from datetime import timedelta
+from unittest.mock import patch
+
+from django.conf import settings
 from django.contrib.auth.models import User
 from django.test import TestCase, override_settings
+from django.utils import timezone
 
-from apps.jobs.models import Job
+from apps.jobs.models import Job, JobHistory
+from apps.jobs.services import promote_due_retries
 from apps.worker.engine import WorkerEngine
+from apps.worker.handlers import dispatch_job, get_external_operation_id
+from apps.worker.recovery import recover_stale_running_jobs
 
 
 class FakeRedis:
@@ -12,6 +20,34 @@ class FakeRedis:
     def zadd(self, key, mapping):
         self.sorted_sets.setdefault(key, {}).update(mapping)
 
+    def zrangebyscore(self, key, min_score, max_score):
+        members = self.sorted_sets.get(key, {})
+        return [
+            member
+            for member, score in members.items()
+            if min_score <= score <= max_score
+        ]
+
+    def zrem(self, key, member):
+        members = self.sorted_sets.get(key, {})
+        if member in members:
+            del members[member]
+            return 1
+        return 0
+
+
+def refund_payload():
+    return {
+        'transaction_id': 'txn-1001',
+        'amount': '1000.00',
+        'currency': 'INR',
+        'webhook_url': 'https://merchant.example/webhooks',
+        'notification': {
+            'channel': 'email',
+            'recipient': 'customer@example.com',
+        },
+    }
+
 
 @override_settings(FINQUEUE_MAX_RETRIES=3)
 class WorkerRetryTests(TestCase):
@@ -19,10 +55,10 @@ class WorkerRetryTests(TestCase):
         user = User.objects.create_user(username='student')
         job = Job.objects.create(
             user=user,
-            job_type=Job.JobType.PROCESS_PAYMENT,
-            priority=Job.Priority.MEDIUM,
+            job_type=Job.JobType.REFUND_PROCESSING,
+            priority=Job.Priority.HIGH,
             status=Job.Status.RUNNING,
-            payload={'amount': 1000},
+            payload=refund_payload(),
         )
         engine = WorkerEngine()
         engine.redis_client = FakeRedis()
@@ -30,6 +66,447 @@ class WorkerRetryTests(TestCase):
         engine.mark_failed(job, 'gateway timeout')
         job.refresh_from_db()
 
-        self.assertEqual(job.status, Job.Status.PENDING)
+        self.assertEqual(job.status, Job.Status.FAILED)
         self.assertEqual(job.retry_count, 1)
         self.assertEqual(job.failure_reason, 'gateway timeout')
+        self.assertEqual(Job.objects.filter(source_job=job).count(), 0)
+
+        history = JobHistory.objects.filter(job=job).latest('created_at')
+        self.assertEqual(history.status, Job.Status.FAILED)
+        self.assertEqual(history.retry_count, 1)
+        self.assertIn('gateway timeout', history.message)
+        self.assertIn(
+            str(job.id),
+            engine.redis_client.sorted_sets[settings.FINQUEUE_RETRY_KEY],
+        )
+
+    def test_due_retry_is_marked_pending_and_moved_to_main_queue(self):
+        user = User.objects.create_user(username='retry-due')
+        job = Job.objects.create(
+            user=user,
+            job_type=Job.JobType.REFUND_PROCESSING,
+            priority=Job.Priority.HIGH,
+            status=Job.Status.FAILED,
+            retry_count=1,
+            payload=refund_payload(),
+            failure_reason='gateway timeout',
+        )
+        redis_client = FakeRedis()
+        redis_client.zadd(
+            settings.FINQUEUE_RETRY_KEY,
+            {str(job.id): timezone.now().timestamp() - 1},
+        )
+
+        promoted = promote_due_retries(redis_client=redis_client)
+        job.refresh_from_db()
+
+        self.assertEqual(promoted, 1)
+        self.assertEqual(job.status, Job.Status.PENDING)
+        self.assertNotIn(
+            str(job.id),
+            redis_client.sorted_sets[settings.FINQUEUE_RETRY_KEY],
+        )
+        self.assertIn(
+            str(job.id),
+            redis_client.sorted_sets[settings.FINQUEUE_JOBS_KEY],
+        )
+
+        history = JobHistory.objects.filter(job=job).latest('created_at')
+        self.assertEqual(history.status, Job.Status.PENDING)
+        self.assertIn('Retry delay elapsed', history.message)
+
+    def test_completed_refund_creates_webhook_and_notification_jobs(self):
+        user = User.objects.create_user(username='refund-success')
+        job = Job.objects.create(
+            user=user,
+            job_type=Job.JobType.REFUND_PROCESSING,
+            priority=Job.Priority.HIGH,
+            status=Job.Status.RUNNING,
+            payload=refund_payload(),
+        )
+        engine = WorkerEngine()
+        engine.redis_client = FakeRedis()
+
+        engine.mark_completed(
+            job,
+            {
+                'refund_id': 'refund-123',
+                'transaction_id': 'txn-1001',
+                'status': 'REFUNDED',
+                'amount': '1000.00',
+                'currency': 'INR',
+            },
+        )
+
+        job.refresh_from_db()
+        follow_ups = Job.objects.filter(source_job=job).order_by('priority')
+
+        self.assertEqual(job.status, Job.Status.COMPLETED)
+        self.assertEqual(follow_ups.count(), 2)
+        self.assertTrue(
+            JobHistory.objects.filter(
+                job=job,
+                status=Job.Status.COMPLETED,
+            ).exists()
+        )
+        self.assertEqual(
+            JobHistory.objects.filter(
+                job__source_job=job,
+                status=Job.Status.PENDING,
+            ).count(),
+            2,
+        )
+
+        webhook = follow_ups.get(job_type=Job.JobType.WEBHOOK_DELIVERY)
+        notification = follow_ups.get(job_type=Job.JobType.SEND_NOTIFICATION)
+
+        self.assertEqual(webhook.priority, Job.Priority.MEDIUM)
+        self.assertEqual(webhook.payload['event'], 'refund.completed')
+        self.assertEqual(webhook.payload['data']['refund_id'], 'refund-123')
+        self.assertEqual(
+            webhook.payload['event_id'],
+            f'webhook:refund.completed:{job.id}',
+        )
+        self.assertEqual(notification.priority, Job.Priority.LOW)
+        self.assertEqual(
+            notification.payload['notification_id'],
+            f'notification:refund.completed:{job.id}',
+        )
+        self.assertIn('has been processed', notification.payload['message'])
+
+    def test_dead_refund_creates_failed_webhook_and_notification_jobs(self):
+        user = User.objects.create_user(username='refund-dead')
+        job = Job.objects.create(
+            user=user,
+            job_type=Job.JobType.REFUND_PROCESSING,
+            priority=Job.Priority.HIGH,
+            status=Job.Status.RUNNING,
+            retry_count=3,
+            payload=refund_payload(),
+        )
+        engine = WorkerEngine()
+        engine.redis_client = FakeRedis()
+
+        engine.mark_failed(job, 'refund provider unavailable')
+
+        job.refresh_from_db()
+        follow_ups = Job.objects.filter(source_job=job)
+
+        self.assertEqual(job.status, Job.Status.DEAD)
+        self.assertEqual(follow_ups.count(), 2)
+        dead_history = JobHistory.objects.filter(job=job).latest('created_at')
+        self.assertEqual(dead_history.status, Job.Status.DEAD)
+        self.assertEqual(dead_history.retry_count, 3)
+        self.assertIn('refund provider unavailable', dead_history.message)
+
+        webhook = follow_ups.get(job_type=Job.JobType.WEBHOOK_DELIVERY)
+        notification = follow_ups.get(job_type=Job.JobType.SEND_NOTIFICATION)
+
+        self.assertEqual(webhook.payload['event'], 'refund.failed')
+        self.assertEqual(
+            webhook.payload['event_id'],
+            f'webhook:refund.failed:{job.id}',
+        )
+        self.assertEqual(
+            webhook.payload['data']['failure_reason'],
+            'refund provider unavailable',
+        )
+        self.assertEqual(
+            notification.payload['notification_id'],
+            f'notification:refund.failed:{job.id}',
+        )
+        self.assertIn('could not be processed', notification.payload['message'])
+
+    def test_follow_up_creation_is_idempotent(self):
+        user = User.objects.create_user(username='refund-idempotent')
+        job = Job.objects.create(
+            user=user,
+            job_type=Job.JobType.REFUND_PROCESSING,
+            priority=Job.Priority.HIGH,
+            status=Job.Status.RUNNING,
+            payload=refund_payload(),
+        )
+        engine = WorkerEngine()
+        engine.redis_client = FakeRedis()
+
+        engine.mark_completed(job, {'refund_id': 'refund-123'})
+        engine._enqueue_terminal_follow_ups(job)
+
+        self.assertEqual(Job.objects.filter(source_job=job).count(), 2)
+
+    def test_webhook_completion_does_not_create_more_follow_up_jobs(self):
+        user = User.objects.create_user(username='webhook-user')
+        job = Job.objects.create(
+            user=user,
+            job_type=Job.JobType.WEBHOOK_DELIVERY,
+            priority=Job.Priority.MEDIUM,
+            status=Job.Status.RUNNING,
+            payload={
+                'url': 'https://merchant.example/webhooks',
+                'event': 'refund.completed',
+            },
+        )
+        engine = WorkerEngine()
+        engine.redis_client = FakeRedis()
+
+        engine.mark_completed(job, {'webhook_delivery_status': 'DELIVERED', 'http_status': 200})
+
+        self.assertEqual(Job.objects.filter(source_job=job).count(), 0)
+
+    def test_webhook_handler_can_simulate_retryable_failure(self):
+        user = User.objects.create_user(username='webhook-failure')
+        job = Job.objects.create(
+            user=user,
+            job_type=Job.JobType.WEBHOOK_DELIVERY,
+            priority=Job.Priority.MEDIUM,
+            payload={
+                'url': 'https://merchant.example/webhooks',
+                'event': 'refund.completed',
+                'simulate_failure': True,
+            },
+        )
+
+        with patch('apps.worker.handlers.time.sleep'):
+            with self.assertRaisesRegex(RuntimeError, 'temporary 5xx'):
+                dispatch_job(job)
+
+    def test_refund_handler_can_fail_randomly(self):
+        user = User.objects.create_user(username='refund-random-failure')
+        job = Job.objects.create(
+            user=user,
+            job_type=Job.JobType.REFUND_PROCESSING,
+            priority=Job.Priority.HIGH,
+            payload=refund_payload(),
+        )
+
+        with patch('apps.worker.handlers.time.sleep'), patch(
+            'apps.worker.handlers.random.random',
+            return_value=0.0,
+        ):
+            with self.assertRaisesRegex(RuntimeError, 'temporarily unavailable'):
+                dispatch_job(job)
+
+    def test_notification_handler_success(self):
+        user = User.objects.create_user(username='notification-user')
+        job = Job.objects.create(
+            user=user,
+            job_type=Job.JobType.SEND_NOTIFICATION,
+            priority=Job.Priority.LOW,
+            payload={
+                'channel': 'email',
+                'recipient': 'user@example.com',
+                'message': 'Your refund is complete.',
+            },
+        )
+
+        with patch('apps.worker.handlers.time.sleep'), patch(
+            'apps.worker.handlers.random.random',
+            return_value=1.0,
+        ):
+            result = dispatch_job(job)
+
+        self.assertEqual(
+            result,
+            {
+                'notification_status': 'SENT',
+                'channel': 'email',
+            },
+        )
+
+
+class ExternalIdempotencyTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username='idempotency-user')
+
+    def test_refund_uses_same_external_key_on_every_retry(self):
+        job = Job.objects.create(
+            user=self.user,
+            job_type=Job.JobType.REFUND_PROCESSING,
+            priority=Job.Priority.HIGH,
+            payload=refund_payload(),
+        )
+
+        expected = f'refund:{job.id}'
+        first_key = get_external_operation_id(job)
+
+        with patch('apps.worker.handlers.time.sleep'), patch(
+            'apps.worker.handlers.random.random',
+            return_value=1.0,
+        ):
+            first_result = dispatch_job(job)
+            second_result = dispatch_job(job)
+
+        second_key = get_external_operation_id(job)
+
+        self.assertEqual(first_key, expected)
+        self.assertEqual(second_key, expected)
+        self.assertEqual(first_result, second_result)
+        self.assertNotIn('external_idempotency_key', first_result)
+
+    def test_webhook_reuses_persisted_event_id(self):
+        job = Job.objects.create(
+            user=self.user,
+            job_type=Job.JobType.WEBHOOK_DELIVERY,
+            priority=Job.Priority.MEDIUM,
+            payload={
+                'url': 'https://merchant.example/webhooks',
+                'event': 'refund.completed',
+                'event_id': 'webhook:refund.completed:source-123',
+                'data': {'refund_id': 'refund-123'},
+            },
+        )
+
+        first_key = get_external_operation_id(job)
+
+        with patch('apps.worker.handlers.time.sleep'), patch(
+            'apps.worker.handlers.random.random',
+            return_value=1.0,
+        ):
+            first_result = dispatch_job(job)
+            second_result = dispatch_job(job)
+
+        second_key = get_external_operation_id(job)
+
+        self.assertEqual(first_key, 'webhook:refund.completed:source-123')
+        self.assertEqual(second_key, 'webhook:refund.completed:source-123')
+        self.assertEqual(
+            first_result,
+            {
+                'webhook_delivery_status': 'DELIVERED',
+                'http_status': 200,
+            },
+        )
+        self.assertEqual(second_result, first_result)
+
+    def test_notification_reuses_persisted_notification_id(self):
+        job = Job.objects.create(
+            user=self.user,
+            job_type=Job.JobType.SEND_NOTIFICATION,
+            priority=Job.Priority.LOW,
+            payload={
+                'channel': 'email',
+                'recipient': 'user@example.com',
+                'message': 'Refund complete.',
+                'notification_id': 'notification:refund.completed:source-123',
+            },
+        )
+
+        first_key = get_external_operation_id(job)
+
+        with patch('apps.worker.handlers.time.sleep'), patch(
+            'apps.worker.handlers.random.random',
+            return_value=1.0,
+        ):
+            first_result = dispatch_job(job)
+            second_result = dispatch_job(job)
+
+        second_key = get_external_operation_id(job)
+
+        self.assertEqual(
+            first_key,
+            'notification:refund.completed:source-123',
+        )
+        self.assertEqual(
+            second_key,
+            'notification:refund.completed:source-123',
+        )
+        self.assertEqual(
+            first_result,
+            {
+                'notification_status': 'SENT',
+                'channel': 'email',
+            },
+        )
+        self.assertEqual(second_result, first_result)
+
+    def test_fallback_external_ids_are_derived_from_job_id(self):
+        webhook = Job.objects.create(
+            user=self.user,
+            job_type=Job.JobType.WEBHOOK_DELIVERY,
+            priority=Job.Priority.MEDIUM,
+            payload={
+                'url': 'https://merchant.example/webhooks',
+                'event': 'manual.test',
+            },
+        )
+        notification = Job.objects.create(
+            user=self.user,
+            job_type=Job.JobType.SEND_NOTIFICATION,
+            priority=Job.Priority.LOW,
+            payload={
+                'channel': 'email',
+                'recipient': 'user@example.com',
+                'message': 'Test',
+            },
+        )
+
+        self.assertEqual(
+            get_external_operation_id(webhook),
+            f'webhook:{webhook.id}',
+        )
+        self.assertEqual(
+            get_external_operation_id(notification),
+            f'notification:{notification.id}',
+        )
+
+
+class StaleJobRecoveryTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username='recovery-user')
+        self.redis = FakeRedis()
+
+    def test_expired_running_job_is_reset_to_pending_and_requeued(self):
+        now = timezone.now()
+        job = Job.objects.create(
+            user=self.user,
+            job_type=Job.JobType.WEBHOOK_DELIVERY,
+            priority=Job.Priority.MEDIUM,
+            status=Job.Status.RUNNING,
+            payload={
+                'url': 'https://merchant.example/webhooks',
+                'event': 'refund.completed',
+            },
+            started_at=now - timedelta(seconds=31),
+        )
+
+        recovered = recover_stale_running_jobs(
+            redis_client=self.redis,
+            now=now,
+        )
+        job.refresh_from_db()
+
+        self.assertEqual(recovered, 1)
+        self.assertEqual(job.status, Job.Status.PENDING)
+        self.assertIsNotNone(job.started_at)
+        self.assertIn('previous external attempt outcome may be unknown', job.failure_reason)
+        self.assertIn(
+            str(job.id),
+            self.redis.sorted_sets[settings.FINQUEUE_JOBS_KEY],
+        )
+        history = JobHistory.objects.filter(job=job).latest('created_at')
+        self.assertEqual(history.status, Job.Status.PENDING)
+        self.assertIn('previous external attempt outcome may be unknown', history.message)
+
+    def test_running_job_under_30_seconds_is_not_recovered(self):
+        now = timezone.now()
+        job = Job.objects.create(
+            user=self.user,
+            job_type=Job.JobType.WEBHOOK_DELIVERY,
+            priority=Job.Priority.MEDIUM,
+            status=Job.Status.RUNNING,
+            payload={
+                'url': 'https://merchant.example/webhooks',
+                'event': 'refund.completed',
+            },
+            started_at=now - timedelta(seconds=20),
+        )
+
+        recovered = recover_stale_running_jobs(
+            redis_client=self.redis,
+            now=now,
+        )
+        job.refresh_from_db()
+
+        self.assertEqual(recovered, 0)
+        self.assertEqual(job.status, Job.Status.RUNNING)
+        self.assertEqual(self.redis.sorted_sets, {})

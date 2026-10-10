@@ -15,24 +15,31 @@ class MetricsViewsTests(TestCase):
 
         Job.objects.create(
             user=owner,
-            job_type=Job.JobType.PROCESS_PAYMENT,
-            priority=Job.Priority.MEDIUM,
+            job_type=Job.JobType.REFUND_PROCESSING,
+            priority=Job.Priority.HIGH,
             status=Job.Status.PENDING,
-            payload={'amount': 1000},
+            payload={'transaction_id': 'txn-1', 'amount': 1000},
         )
         Job.objects.create(
             user=owner,
-            job_type=Job.JobType.FRAUD_CHECK,
-            priority=Job.Priority.HIGH,
+            job_type=Job.JobType.WEBHOOK_DELIVERY,
+            priority=Job.Priority.MEDIUM,
             status=Job.Status.COMPLETED,
-            payload={'amount': 2500},
+            payload={
+                'url': 'https://merchant.example/webhooks',
+                'event': 'refund.completed',
+            },
         )
         Job.objects.create(
             user=other,
-            job_type=Job.JobType.PROCESS_PAYMENT,
+            job_type=Job.JobType.SEND_NOTIFICATION,
             priority=Job.Priority.LOW,
             status=Job.Status.DEAD,
-            payload={'amount': 3000},
+            payload={
+                'channel': 'email',
+                'recipient': 'other@example.com',
+                'message': 'Update',
+            },
         )
 
         self.client.force_authenticate(owner)
