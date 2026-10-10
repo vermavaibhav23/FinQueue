@@ -6,7 +6,16 @@ from django.utils import timezone
 
 from core.redis_client import get_redis_client
 
-from .models import Job
+from .models import Job, JobHistory
+
+
+def record_job_history(job, message=None):
+    return JobHistory.objects.create(
+        job=job,
+        status=job.status,
+        retry_count=job.retry_count,
+        message=message,
+    )
 
 
 PRIORITY_SCORES = {
@@ -146,7 +155,7 @@ def create_refund_follow_up_jobs(refund_job, redis_client=None):
 
     with transaction.atomic():
         for job_type, priority, follow_up_payload in follow_up_specs:
-            follow_up_job, _ = Job.objects.get_or_create(
+            follow_up_job, created = Job.objects.get_or_create(
                 source_job=refund_job,
                 source_event=event,
                 job_type=job_type,
@@ -156,6 +165,11 @@ def create_refund_follow_up_jobs(refund_job, redis_client=None):
                     'payload': follow_up_payload,
                 },
             )
+            if created:
+                record_job_history(
+                    follow_up_job,
+                    message=f'Follow-up job created from {event}.',
+                )
             follow_up_jobs.append(follow_up_job)
 
     for follow_up_job in follow_up_jobs:
