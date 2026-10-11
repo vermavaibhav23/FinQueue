@@ -2,7 +2,11 @@ from django.db import transaction
 from django.utils import timezone
 
 from apps.jobs.models import Job
-from apps.jobs.services import enqueue_job, record_job_history
+from apps.jobs.services import (
+    create_refund_follow_up_jobs,
+    enqueue_job,
+    record_job_history,
+)
 
 from .models import DeadLetterQueue
 
@@ -33,7 +37,9 @@ def move_to_dead_letter_queue(job, failure_reason):
             retry_attempts=job.retry_count,
         )
 
-    return dlq_entry
+        follow_up_jobs = create_refund_follow_up_jobs(job)
+
+    return dlq_entry, follow_up_jobs
 
 
 def requeue_dead_letter_job(dlq_entry, redis_client=None):
