@@ -166,6 +166,14 @@ allows at most one webhook and one notification per source event, making
 follow-up creation idempotent while still allowing a requeued failed refund to
 later emit a separate success event.
 
+For a refund terminal transition, the terminal Job update, its JobHistory row,
+and the follow-up Job rows are written in the same MySQL transaction. For a
+DEAD refund, the DLQ row is part of that same transaction too. The follow-up
+job IDs are pushed to Redis only after the database transaction commits, so a
+refund cannot be committed as terminal without its corresponding follow-up
+records.
+
+
 ## Demo routing data
 
 To keep this educational project focused on asynchronous processing rather than
