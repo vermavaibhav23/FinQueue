@@ -10,6 +10,7 @@ from apps.jobs.models import Job
 from apps.jobs.services import (
     calculate_retry_delay,
     create_refund_follow_up_jobs,
+    enqueue_job,
     promote_due_retries,
     record_job_history,
     schedule_retry,
@@ -95,9 +96,10 @@ class WorkerEngine:
                 )
             )
             record_job_history(job, message='Job completed successfully.')
+            follow_up_jobs = create_refund_follow_up_jobs(job)
 
+        self._enqueue_follow_up_jobs(follow_up_jobs)
         logger.info('Completed job %s.', job.id)
-        self._enqueue_terminal_follow_ups(job)
 
     def mark_failed(self, job, failure_reason):
         if job.retry_count < settings.FINQUEUE_MAX_RETRIES:
@@ -130,7 +132,11 @@ class WorkerEngine:
             )
             return
 
-        dlq_entry = move_to_dead_letter_queue(job, failure_reason)
+        dlq_entry, follow_up_jobs = move_to_dead_letter_queue(
+            job,
+            failure_reason,
+        )
+        self._enqueue_follow_up_jobs(follow_up_jobs)
         logger.error(
             'Moved job %s to DLQ entry %s after %s retries: %s',
             job.id,
@@ -138,26 +144,14 @@ class WorkerEngine:
             job.retry_count,
             failure_reason,
         )
-        self._enqueue_terminal_follow_ups(job)
 
-    def _enqueue_terminal_follow_ups(self, job):
-        if job.job_type != Job.JobType.REFUND_PROCESSING:
-            return
+    def _enqueue_follow_up_jobs(self, follow_up_jobs):
+        for follow_up_job in follow_up_jobs:
+            if follow_up_job.status == Job.Status.PENDING:
+                enqueue_job(follow_up_job, redis_client=self.redis_client)
 
-        try:
-            follow_up_jobs = create_refund_follow_up_jobs(
-                job,
-                redis_client=self.redis_client,
+        if follow_up_jobs:
+            logger.info(
+                'Queued %s refund follow-up jobs.',
+                len(follow_up_jobs),
             )
-        except Exception:
-            logger.exception(
-                'Could not create follow-up jobs for refund job %s.',
-                job.id,
-            )
-            return
-
-        logger.info(
-            'Created/queued %s follow-up jobs for refund job %s.',
-            len(follow_up_jobs),
-            job.id,
-        )
