@@ -3,11 +3,12 @@ from unittest.mock import patch
 
 from django.conf import settings
 from django.contrib.auth.models import User
+from django.db import transaction
 from django.test import TestCase, override_settings
 from django.utils import timezone
 
 from apps.jobs.models import Job, JobHistory
-from apps.jobs.services import promote_due_retries
+from apps.jobs.services import create_refund_follow_up_jobs, promote_due_retries
 from apps.worker.engine import WorkerEngine
 from apps.worker.handlers import dispatch_job, get_external_operation_id
 from apps.worker.recovery import recover_stale_running_jobs
@@ -230,7 +231,9 @@ class WorkerRetryTests(TestCase):
         engine.redis_client = FakeRedis()
 
         engine.mark_completed(job, {'refund_id': 'refund-123'})
-        engine._enqueue_terminal_follow_ups(job)
+
+        with transaction.atomic():
+            create_refund_follow_up_jobs(job)
 
         self.assertEqual(Job.objects.filter(source_job=job).count(), 2)
 
