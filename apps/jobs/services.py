@@ -103,7 +103,13 @@ def promote_due_retries(redis_client=None):
     return promoted_count
 
 
-def create_refund_follow_up_jobs(refund_job, redis_client=None):
+def create_refund_follow_up_jobs(refund_job):
+    """
+    Create refund terminal follow-up Job rows and their initial history.
+
+    This function only changes MySQL. Callers enqueue the returned jobs in
+    Redis after the surrounding database transaction commits.
+    """
     if refund_job.job_type != Job.JobType.REFUND_PROCESSING:
         return []
 
@@ -128,8 +134,6 @@ def create_refund_follow_up_jobs(refund_job, redis_client=None):
             f"{payload.get('currency', 'INR')} could not be processed."
         )
 
-    # These IDs stay stable for the same logical external side effect.
-    # A downstream merchant/provider can use them as its idempotency key.
     event_id = f'webhook:{event}:{refund_job.id}'
     notification_id = f'notification:{event}:{refund_job.id}'
 
@@ -170,27 +174,23 @@ def create_refund_follow_up_jobs(refund_job, redis_client=None):
 
     follow_up_jobs = []
 
-    with transaction.atomic():
-        for job_type, priority, follow_up_payload in follow_up_specs:
-            follow_up_job, created = Job.objects.get_or_create(
-                source_job=refund_job,
-                source_event=event,
-                job_type=job_type,
-                defaults={
-                    'user': refund_job.user,
-                    'priority': priority,
-                    'payload': follow_up_payload,
-                },
+    for job_type, priority, follow_up_payload in follow_up_specs:
+        follow_up_job, created = Job.objects.get_or_create(
+            source_job=refund_job,
+            source_event=event,
+            job_type=job_type,
+            defaults={
+                'user': refund_job.user,
+                'priority': priority,
+                'payload': follow_up_payload,
+            },
+        )
+        if created:
+            record_job_history(
+                follow_up_job,
+                message=f'Follow-up job created from {event}.',
             )
-            if created:
-                record_job_history(
-                    follow_up_job,
-                    message=f'Follow-up job created from {event}.',
-                )
-            follow_up_jobs.append(follow_up_job)
-
-    for follow_up_job in follow_up_jobs:
-        if follow_up_job.status == Job.Status.PENDING:
-            enqueue_job(follow_up_job, redis_client=redis_client)
+        follow_up_jobs.append(follow_up_job)
 
     return follow_up_jobs
+
