@@ -162,7 +162,7 @@ these fields `NULL`. An idempotent replay returns `200 OK` with
 `"idempotent_replay": true`.
 
 This is separate from follow-up idempotency, which uses
-`UNIQUE(source_job, job_type, source_event)`.
+`UNIQUE(source_job, processing_round, job_type, source_event)`. 
 
 ### External side-effect idempotency
 
@@ -170,8 +170,8 @@ FinQueue also sends a stable downstream idempotency/event ID on every retry of
 the same logical external action:
 
 - refund provider: `Idempotency-Key: refund:<job_uuid>`
-- webhook: stable `event_id` such as `webhook:refund.completed:<refund_job_uuid>`
-- notification provider: stable `notification_id`
+- webhook: stable `event_id` such as `webhook:refund.completed:<refund_job_uuid>:round:1`
+- notification provider: stable `notification_id`, such as `notification:refund.completed:<refund_job_uuid>:round:1`
 
 If a worker crashes after the external system processed the request but before
 FinQueue saved `COMPLETED`, stale-job recovery may retry the job. The retry
@@ -274,7 +274,7 @@ send_notification   priority=low       failure message
 The failed webhook contains the final `failure_reason`.
 
 Follow-up creation is idempotent per terminal event: at most one webhook and
-one notification job are created for each `source_job + source_event` pair.
+one notification job are created for each `source_job + processing_round + source_event` combination.
 
 ## Direct webhook/notification submission
 
@@ -368,8 +368,8 @@ GET {{base_url}}/jobs/{{job_id}}/
 Authorization: Bearer {{access_token}}
 ```
 
-Follow-up jobs include the original refund UUID in `source_job` and the
-triggering terminal event in `source_event`.
+Follow-up jobs include the original refund UUID in `source_job`, the
+triggering terminal event in `source_event`, and the refund's `processing_round`.
 
 Example completed refund:
 
@@ -377,6 +377,7 @@ Example completed refund:
 {
   "id": "12f18c85-b610-4bf6-9fd9-1b5a9c645e78",
   "source_job": null,
+  "processing_round": 1,
   "job_type": "refund_processing",
   "priority": "high",
   "status": "completed",
@@ -470,6 +471,13 @@ Requeue an entry:
 POST {{base_url}}/dlq/{{dlq_id}}/requeue/
 Authorization: Bearer {{admin_access_token}}
 ```
+
+Only jobs currently `DEAD` can be manually requeued. Requeueing a DEAD
+**refund** increments its `processing_round` (1 -> 2 -> 3), allowing fresh
+webhook and notification jobs for its next terminal outcome. Their external
+event IDs include that round. The refund provider idempotency key stays
+`refund:<job_uuid>` across all rounds. Requeueing a DEAD webhook or
+notification does *not* advance the round or change its external event ID.
 
 ## Metrics
 
