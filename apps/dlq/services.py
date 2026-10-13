@@ -1,5 +1,6 @@
 from django.db import transaction
 from django.utils import timezone
+from rest_framework.exceptions import ValidationError
 
 from apps.jobs.models import Job
 from apps.jobs.services import (
@@ -44,7 +45,16 @@ def move_to_dead_letter_queue(job, failure_reason):
 
 def requeue_dead_letter_job(dlq_entry, redis_client=None):
     with transaction.atomic():
-        job = dlq_entry.original_job
+        # Lock and recheck: two admin requests must not advance the round twice.
+        job = Job.objects.select_for_update().get(pk=dlq_entry.original_job_id)
+        if job.status != Job.Status.DEAD:
+            raise ValidationError('Only DEAD jobs can be manually requeued.')
+
+        # A requeued refund produces a *new* terminal event. Retrying a DEAD
+        # webhook/notification instead repeats the same existing event.
+        if job.job_type == Job.JobType.REFUND_PROCESSING:
+            job.processing_round += 1
+
         job.status = Job.Status.PENDING
         job.retry_count = 0
         job.result = None
@@ -52,6 +62,7 @@ def requeue_dead_letter_job(dlq_entry, redis_client=None):
         job.completed_at = None
         job.save(
             update_fields=(
+                'processing_round',
                 'status',
                 'retry_count',
                 'result',
