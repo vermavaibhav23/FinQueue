@@ -134,11 +134,13 @@ def create_refund_follow_up_jobs(refund_job):
             f"{payload.get('currency', 'INR')} could not be processed."
         )
 
-    event_id = f'webhook:{event}:{refund_job.id}'
-    notification_id = f'notification:{event}:{refund_job.id}'
+    # Stable within this round, but a new event after a manual DLQ requeue.
+    event_id = f'webhook:{event}:{refund_job.id}:round:{refund_job.processing_round}'
+    notification_id = f'notification:{event}:{refund_job.id}:round:{refund_job.processing_round}'
 
     event_data = {
         'source_job_id': str(refund_job.id),
+        'processing_round': refund_job.processing_round,
         'transaction_id': payload.get('transaction_id'),
         'refund_id': refund_id,
         'amount': str(payload.get('amount')),
@@ -177,6 +179,7 @@ def create_refund_follow_up_jobs(refund_job):
     for job_type, priority, follow_up_payload in follow_up_specs:
         follow_up_job, created = Job.objects.get_or_create(
             source_job=refund_job,
+            processing_round=refund_job.processing_round,
             source_event=event,
             job_type=job_type,
             defaults={
