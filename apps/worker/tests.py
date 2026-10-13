@@ -7,6 +7,8 @@ from django.db import transaction
 from django.test import TestCase, override_settings
 from django.utils import timezone
 
+from apps.dlq.models import DeadLetterQueue
+from apps.dlq.services import requeue_dead_letter_job
 from apps.jobs.models import Job, JobHistory
 from apps.jobs.services import create_refund_follow_up_jobs, promote_due_retries
 from apps.worker.engine import WorkerEngine
@@ -166,12 +168,12 @@ class WorkerRetryTests(TestCase):
         self.assertEqual(webhook.payload['data']['refund_id'], 'refund-123')
         self.assertEqual(
             webhook.payload['event_id'],
-            f'webhook:refund.completed:{job.id}',
+            f'webhook:refund.completed:{job.id}:round:1',
         )
         self.assertEqual(notification.priority, Job.Priority.LOW)
         self.assertEqual(
             notification.payload['notification_id'],
-            f'notification:refund.completed:{job.id}',
+            f'notification:refund.completed:{job.id}:round:1',
         )
         self.assertIn('has been processed', notification.payload['message'])
 
@@ -206,7 +208,7 @@ class WorkerRetryTests(TestCase):
         self.assertEqual(webhook.payload['event'], 'refund.failed')
         self.assertEqual(
             webhook.payload['event_id'],
-            f'webhook:refund.failed:{job.id}',
+            f'webhook:refund.failed:{job.id}:round:1',
         )
         self.assertEqual(
             webhook.payload['data']['failure_reason'],
@@ -214,7 +216,7 @@ class WorkerRetryTests(TestCase):
         )
         self.assertEqual(
             notification.payload['notification_id'],
-            f'notification:refund.failed:{job.id}',
+            f'notification:refund.failed:{job.id}:round:1',
         )
         self.assertIn('could not be processed', notification.payload['message'])
 
@@ -236,6 +238,106 @@ class WorkerRetryTests(TestCase):
             create_refund_follow_up_jobs(job)
 
         self.assertEqual(Job.objects.filter(source_job=job).count(), 2)
+
+    def test_second_dead_round_creates_new_follow_ups_but_not_duplicates(self):
+        user = User.objects.create_user(username='refund-two-dead-rounds')
+        job = Job.objects.create(
+            user=user,
+            job_type=Job.JobType.REFUND_PROCESSING,
+            priority=Job.Priority.HIGH,
+            status=Job.Status.RUNNING,
+            retry_count=3,
+            payload=refund_payload(),
+        )
+        engine = WorkerEngine()
+        engine.redis_client = FakeRedis()
+
+        refund_external_key = get_external_operation_id(job)
+        engine.mark_failed(job, 'first provider failure')
+        first_round = list(Job.objects.filter(source_job=job))
+        self.assertEqual(len(first_round), 2)
+        self.assertTrue(all(item.processing_round == 1 for item in first_round))
+
+        # Previously delivered follow-ups remain immutable audit records.
+        for item in first_round:
+            item.status = Job.Status.COMPLETED
+            item.save(update_fields=('status', 'updated_at'))
+
+        dlq_entry = DeadLetterQueue.objects.get(original_job=job)
+        requeue_dead_letter_job(dlq_entry, redis_client=engine.redis_client)
+        job.refresh_from_db()
+        self.assertEqual(job.processing_round, 2)
+        self.assertEqual(get_external_operation_id(job), refund_external_key)
+
+        # Simulate the second manual processing cycle exhausting its retries.
+        job.status = Job.Status.RUNNING
+        job.retry_count = 3
+        job.save(update_fields=('status', 'retry_count', 'updated_at'))
+        engine.mark_failed(job, 'second provider failure')
+
+        second_round = list(
+            Job.objects.filter(source_job=job, processing_round=2)
+        )
+        self.assertEqual(len(second_round), 2)
+        self.assertEqual(Job.objects.filter(source_job=job).count(), 4)
+        self.assertEqual(
+            Job.objects.filter(source_job=job, processing_round=1,
+                               status=Job.Status.COMPLETED).count(),
+            2,
+        )
+        first_ids = {get_external_operation_id(item) for item in first_round}
+        second_ids = {get_external_operation_id(item) for item in second_round}
+        self.assertTrue(first_ids.isdisjoint(second_ids))
+        self.assertEqual(
+            {item.job_type for item in second_round},
+            {Job.JobType.WEBHOOK_DELIVERY, Job.JobType.SEND_NOTIFICATION},
+        )
+        for item in second_round:
+            self.assertIn(':round:2', get_external_operation_id(item))
+            self.assertIn(
+                str(item.id),
+                engine.redis_client.sorted_sets[settings.FINQUEUE_JOBS_KEY],
+            )
+
+        # Repeating creation for the same terminal event and round is safe.
+        with transaction.atomic():
+            repeated_jobs = create_refund_follow_up_jobs(job)
+        self.assertEqual(Job.objects.filter(source_job=job).count(), 4)
+        self.assertEqual(
+            {item.id for item in repeated_jobs},
+            {item.id for item in second_round},
+        )
+
+    def test_manual_requeue_then_success_gets_distinct_event_ids(self):
+        user = User.objects.create_user(username='refund-dead-then-success')
+        job = Job.objects.create(
+            user=user,
+            job_type=Job.JobType.REFUND_PROCESSING,
+            priority=Job.Priority.HIGH,
+            status=Job.Status.RUNNING,
+            retry_count=3,
+            payload=refund_payload(),
+        )
+        engine = WorkerEngine()
+        engine.redis_client = FakeRedis()
+        engine.mark_failed(job, 'gateway unavailable')
+
+        dlq_entry = DeadLetterQueue.objects.get(original_job=job)
+        requeue_dead_letter_job(dlq_entry, redis_client=engine.redis_client)
+        job.refresh_from_db()
+        job.status = Job.Status.RUNNING
+        job.save(update_fields=('status', 'updated_at'))
+        engine.mark_completed(job, {'refund_id': 'refund-recovered'})
+
+        self.assertEqual(Job.objects.filter(source_job=job).count(), 4)
+        round_two = Job.objects.filter(source_job=job, processing_round=2)
+        self.assertEqual(
+            set(round_two.values_list('source_event', flat=True)),
+            {'refund.completed'},
+        )
+        for item in round_two:
+            self.assertIn(':round:2', get_external_operation_id(item))
+        self.assertEqual(get_external_operation_id(job), f'refund:{job.id}')
 
     def test_webhook_completion_does_not_create_more_follow_up_jobs(self):
         user = User.objects.create_user(username='webhook-user')

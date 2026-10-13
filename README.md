@@ -63,14 +63,20 @@ FinQueue now demonstrates all three idempotency layers discussed in the design:
    Internally generated follow-up jobs leave these fields `NULL`.
 2. **Follow-up job creation idempotency** — internally generated webhook and
    notification jobs are protected by
-   `UNIQUE(source_job, job_type, source_event)`.
+   `UNIQUE(source_job, processing_round, job_type, source_event)`.
+   A new refund starts at round 1, and each manual DLQ requeue increments its
+   round. Automatic worker retries do not advance the round.
 3. **External side-effect idempotency** — every retry of the same logical
    external action reuses a stable ID:
    - refund provider call: `Idempotency-Key: refund:<job_uuid>`
-   - webhook delivery: `event_id = webhook:refund.completed:<source_job_uuid>`
-     (or `webhook:refund.failed:<source_job_uuid>`)
+   - webhook delivery: `event_id = webhook:<event>:<source_job_uuid>:round:<round>`
    - notification delivery:
-     `notification_id = notification:<event>:<source_job_uuid>`
+     `notification_id = notification:<event>:<source_job_uuid>:round:<round>`
+
+   The refund provider key stays `refund:<job_uuid>` across manual requeues:
+   repeating the refund must never send money twice. Webhooks and notifications
+   instead get fresh IDs for each new processing round, but stable IDs on
+   retries within that round.
 
 Layer 3 is cooperative: FinQueue guarantees that it sends the **same stable ID**
 on every retry, but the payment gateway, merchant webhook receiver, or
@@ -160,11 +166,17 @@ When a refund exhausts all retries and becomes `dead`:
 The refund status is never rolled back because a webhook or notification later
 fails.
 
-Follow-up jobs store both `source_job` and `source_event` (for example,
-`refund.completed` or `refund.failed`). A database uniqueness constraint
-allows at most one webhook and one notification per source event, making
-follow-up creation idempotent while still allowing a requeued failed refund to
-later emit a separate success event.
+Follow-up jobs store `source_job`, `source_event`, and `processing_round`
+(for example, `refund.failed` in round 1 or 2). A database uniqueness
+constraint allows at most one webhook and one notification per event **per
+round**. A refund manually requeued from the DLQ advances to the next round,
+so a second `refund.failed` (or a later `refund.completed`) creates new
+follow-up jobs and external event IDs. Previously completed follow-ups are
+preserved rather than reset.
+
+Manually requeueing a failed webhook or notification **does not** increment
+its processing round: it is a retry of the same event, not a new refund
+outcome. Requeueing is allowed only for jobs currently marked `DEAD`.
 
 For a refund terminal transition, the terminal Job update, its JobHistory row,
 and the follow-up Job rows are written in the same MySQL transaction. For a

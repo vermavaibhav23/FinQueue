@@ -149,6 +149,7 @@ class JobSerializer(serializers.ModelSerializer):
             'id',
             'source_job',
             'source_event',
+            'processing_round',
             'job_type',
             'priority',
             'status',
