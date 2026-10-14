@@ -134,9 +134,8 @@ def create_refund_follow_up_jobs(refund_job):
             f"{payload.get('currency', 'INR')} could not be processed."
         )
 
-    # Stable within this round, but a new event after a manual DLQ requeue.
-    event_id = f'webhook:{event}:{refund_job.id}:round:{refund_job.processing_round}'
-    notification_id = f'notification:{event}:{refund_job.id}:round:{refund_job.processing_round}'
+    # L3 external IDs come from the new follow-up jobs' UUIDs, not the
+    # parent refund, event, or round. L2 still uses those fields to dedupe.
 
     event_data = {
         'source_job_id': str(refund_job.id),
@@ -158,7 +157,6 @@ def create_refund_follow_up_jobs(refund_job):
             {
                 'url': payload.get('webhook_url'),
                 'event': event,
-                'event_id': event_id,
                 'data': event_data,
             },
         ),
@@ -169,7 +167,6 @@ def create_refund_follow_up_jobs(refund_job):
                 'channel': notification.get('channel'),
                 'recipient': notification.get('recipient'),
                 'message': message,
-                'notification_id': notification_id,
             },
         ),
     )

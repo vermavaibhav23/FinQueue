@@ -69,14 +69,15 @@ FinQueue now demonstrates all three idempotency layers discussed in the design:
 3. **External side-effect idempotency** — every retry of the same logical
    external action reuses a stable ID:
    - refund provider call: `Idempotency-Key: refund:<job_uuid>`
-   - webhook delivery: `event_id = webhook:<event>:<source_job_uuid>:round:<round>`
+   - webhook delivery: `event_id = webhook:<follow_up_job_uuid>`
    - notification delivery:
-     `notification_id = notification:<event>:<source_job_uuid>:round:<round>`
+     `notification_id = notification:<follow_up_job_uuid>`
 
    The refund provider key stays `refund:<job_uuid>` across manual requeues:
-   repeating the refund must never send money twice. Webhooks and notifications
-   instead get fresh IDs for each new processing round, but stable IDs on
-   retries within that round.
+   repeating the refund must never send money twice. Each new webhook or
+   notification Job gets its own UUID-based external ID; retrying or requeueing
+   that same follow-up reuses its ID. `processing_round` remains part of Layer 2
+   deduplication, but is not needed in these Layer 3 keys.
 
 Layer 3 is cooperative: FinQueue guarantees that it sends the **same stable ID**
 on every retry, but the payment gateway, merchant webhook receiver, or
@@ -171,7 +172,7 @@ Follow-up jobs store `source_job`, `source_event`, and `processing_round`
 constraint allows at most one webhook and one notification per event **per
 round**. A refund manually requeued from the DLQ advances to the next round,
 so a second `refund.failed` (or a later `refund.completed`) creates new
-follow-up jobs and external event IDs. Previously completed follow-ups are
+follow-up jobs with their own UUID-based external IDs. Previously completed follow-ups are
 preserved rather than reset.
 
 Manually requeueing a failed webhook or notification **does not** increment

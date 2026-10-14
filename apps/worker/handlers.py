@@ -16,8 +16,8 @@ def get_external_operation_id(job):
     """
     Return the stable ID FinQueue sends to the downstream system.
 
-    The same Job row is retried after failures/recovery, so deriving the ID from
-    persisted job/source information guarantees every retry sends the same ID.
+    Retries and recovery reuse the same Job UUID and downstream ID. A new
+    follow-up Job has a new UUID, even if the parent refund is requeued.
     The receiving system still has to honor that ID for true external
     idempotency.
     """
@@ -25,12 +25,10 @@ def get_external_operation_id(job):
         return f'refund:{job.id}'
 
     if job.job_type == Job.JobType.WEBHOOK_DELIVERY:
-        event_id = str(job.payload.get('event_id', '')).strip()
-        return event_id or f'webhook:{job.id}'
+        return f'webhook:{job.id}'
 
     if job.job_type == Job.JobType.SEND_NOTIFICATION:
-        notification_id = str(job.payload.get('notification_id', '')).strip()
-        return notification_id or f'notification:{job.id}'
+        return f'notification:{job.id}'
 
     return f'job:{job.id}'
 

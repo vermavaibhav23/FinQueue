@@ -170,8 +170,8 @@ FinQueue also sends a stable downstream idempotency/event ID on every retry of
 the same logical external action:
 
 - refund provider: `Idempotency-Key: refund:<job_uuid>`
-- webhook: stable `event_id` such as `webhook:refund.completed:<refund_job_uuid>:round:1`
-- notification provider: stable `notification_id`, such as `notification:refund.completed:<refund_job_uuid>:round:1`
+- webhook: outbound `event_id` = `webhook:<webhook_job_uuid>`
+- notification provider: outbound `notification_id` = `notification:<notification_job_uuid>`
 
 If a worker crashes after the external system processed the request but before
 FinQueue saved `COMPLETED`, stale-job recovery may retry the job. The retry
@@ -196,7 +196,6 @@ Example generated webhook payload:
 {
   "url": "https://merchant.example/webhooks",
   "event": "refund.completed",
-  "event_id": "webhook:refund.completed:12f18c85-b610-4bf6-9fd9-1b5a9c645e78",
   "data": {
     "source_job_id": "12f18c85-b610-4bf6-9fd9-1b5a9c645e78",
     "transaction_id": "txn-1001",
@@ -214,8 +213,7 @@ Example generated notification payload:
 {
   "channel": "email",
   "recipient": "customer@example.com",
-  "message": "Your refund of 1000.00 INR has been processed.",
-  "notification_id": "notification:refund.completed:12f18c85-b610-4bf6-9fd9-1b5a9c645e78"
+  "message": "Your refund of 1000.00 INR has been processed."
 }
 ```
 
@@ -244,8 +242,11 @@ Worker result JSON is intentionally concise:
 }
 ```
 
-External idempotency IDs are used while making the outbound call and are not
-duplicated in `Job.result`.
+Each follow-up's ID is derived after its Job row is created. The webhook
+handler sends `event_id: webhook:<webhook_job_uuid>` in the outbound body;
+a real notification provider would receive `notification:<notification_job_uuid>`
+as its deduplication key. These external IDs are not persisted redundantly in
+the follow-up payload or returned in `Job.result`.
 
 For Layer 3 external idempotency, these IDs appear at different boundaries:
 
@@ -253,10 +254,10 @@ For Layer 3 external idempotency, these IDs appear at different boundaries:
   event ID; FinQueue creates the refund job first
 - when the refund worker calls a real payment provider, it would send
   `Idempotency-Key: refund:<refund_job_uuid>` as an outbound request header
-- the internally generated webhook job stores `event_id` in its payload and
-  the outbound webhook body includes that same `event_id`
-- the internally generated notification job stores `notification_id` in its
-  payload and a real notification provider would receive that same stable ID
+- the webhook handler derives `event_id` from the webhook job's own UUID and
+  includes it in the outbound webhook body
+- the notification handler derives `notification_id` from the notification
+  job's own UUID; a real notification provider would receive that stable ID
 
 ### On terminal refund failure
 
@@ -474,10 +475,11 @@ Authorization: Bearer {{admin_access_token}}
 
 Only jobs currently `DEAD` can be manually requeued. Requeueing a DEAD
 **refund** increments its `processing_round` (1 -> 2 -> 3), allowing fresh
-webhook and notification jobs for its next terminal outcome. Their external
-event IDs include that round. The refund provider idempotency key stays
+webhook and notification jobs for its next terminal outcome. Each new
+follow-up has a new UUID-based external ID; the round only affects Layer 2
+deduplication. The refund provider idempotency key stays
 `refund:<job_uuid>` across all rounds. Requeueing a DEAD webhook or
-notification does *not* advance the round or change its external event ID.
+notification does *not* advance the round or change its external ID.
 
 ## Metrics
 

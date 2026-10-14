@@ -166,14 +166,16 @@ class WorkerRetryTests(TestCase):
         self.assertEqual(webhook.priority, Job.Priority.MEDIUM)
         self.assertEqual(webhook.payload['event'], 'refund.completed')
         self.assertEqual(webhook.payload['data']['refund_id'], 'refund-123')
+        self.assertNotIn('event_id', webhook.payload)
         self.assertEqual(
-            webhook.payload['event_id'],
-            f'webhook:refund.completed:{job.id}:round:1',
+            get_external_operation_id(webhook),
+            f'webhook:{webhook.id}',
         )
         self.assertEqual(notification.priority, Job.Priority.LOW)
+        self.assertNotIn('notification_id', notification.payload)
         self.assertEqual(
-            notification.payload['notification_id'],
-            f'notification:refund.completed:{job.id}:round:1',
+            get_external_operation_id(notification),
+            f'notification:{notification.id}',
         )
         self.assertIn('has been processed', notification.payload['message'])
 
@@ -206,17 +208,19 @@ class WorkerRetryTests(TestCase):
         notification = follow_ups.get(job_type=Job.JobType.SEND_NOTIFICATION)
 
         self.assertEqual(webhook.payload['event'], 'refund.failed')
+        self.assertNotIn('event_id', webhook.payload)
         self.assertEqual(
-            webhook.payload['event_id'],
-            f'webhook:refund.failed:{job.id}:round:1',
+            get_external_operation_id(webhook),
+            f'webhook:{webhook.id}',
         )
         self.assertEqual(
             webhook.payload['data']['failure_reason'],
             'refund provider unavailable',
         )
+        self.assertNotIn('notification_id', notification.payload)
         self.assertEqual(
-            notification.payload['notification_id'],
-            f'notification:refund.failed:{job.id}:round:1',
+            get_external_operation_id(notification),
+            f'notification:{notification.id}',
         )
         self.assertIn('could not be processed', notification.payload['message'])
 
@@ -293,7 +297,14 @@ class WorkerRetryTests(TestCase):
             {Job.JobType.WEBHOOK_DELIVERY, Job.JobType.SEND_NOTIFICATION},
         )
         for item in second_round:
-            self.assertIn(':round:2', get_external_operation_id(item))
+            prefix = (
+                'webhook' if item.job_type == Job.JobType.WEBHOOK_DELIVERY
+                else 'notification'
+            )
+            self.assertEqual(
+                get_external_operation_id(item),
+                f'{prefix}:{item.id}',
+            )
             self.assertIn(
                 str(item.id),
                 engine.redis_client.sorted_sets[settings.FINQUEUE_JOBS_KEY],
@@ -308,7 +319,7 @@ class WorkerRetryTests(TestCase):
             {item.id for item in second_round},
         )
 
-    def test_manual_requeue_then_success_gets_distinct_event_ids(self):
+    def test_manual_requeue_then_success_gets_distinct_follow_up_ids(self):
         user = User.objects.create_user(username='refund-dead-then-success')
         job = Job.objects.create(
             user=user,
@@ -335,8 +346,18 @@ class WorkerRetryTests(TestCase):
             set(round_two.values_list('source_event', flat=True)),
             {'refund.completed'},
         )
+        round_one_ids = {
+            get_external_operation_id(item)
+            for item in Job.objects.filter(source_job=job, processing_round=1)
+        }
+        round_two_ids = {get_external_operation_id(item) for item in round_two}
+        self.assertTrue(round_one_ids.isdisjoint(round_two_ids))
         for item in round_two:
-            self.assertIn(':round:2', get_external_operation_id(item))
+            prefix = (
+                'webhook' if item.job_type == Job.JobType.WEBHOOK_DELIVERY
+                else 'notification'
+            )
+            self.assertEqual(get_external_operation_id(item), f'{prefix}:{item.id}')
         self.assertEqual(get_external_operation_id(job), f'refund:{job.id}')
 
     def test_webhook_completion_does_not_create_more_follow_up_jobs(self):
@@ -448,7 +469,7 @@ class ExternalIdempotencyTests(TestCase):
         self.assertEqual(first_result, second_result)
         self.assertNotIn('external_idempotency_key', first_result)
 
-    def test_webhook_reuses_persisted_event_id(self):
+    def test_webhook_uses_job_id_even_with_legacy_payload_event_id(self):
         job = Job.objects.create(
             user=self.user,
             job_type=Job.JobType.WEBHOOK_DELIVERY,
@@ -461,29 +482,26 @@ class ExternalIdempotencyTests(TestCase):
             },
         )
 
-        first_key = get_external_operation_id(job)
-
+        expected = f'webhook:{job.id}'
         with patch('apps.worker.handlers.time.sleep'), patch(
             'apps.worker.handlers.random.random',
             return_value=1.0,
-        ):
+        ), patch('apps.worker.handlers.logger.info') as log_info:
             first_result = dispatch_job(job)
+            first_outbound = log_info.call_args.args[2]
             second_result = dispatch_job(job)
+            second_outbound = log_info.call_args.args[2]
 
-        second_key = get_external_operation_id(job)
-
-        self.assertEqual(first_key, 'webhook:refund.completed:source-123')
-        self.assertEqual(second_key, 'webhook:refund.completed:source-123')
+        self.assertEqual(get_external_operation_id(job), expected)
+        self.assertEqual(first_outbound['event_id'], expected)
+        self.assertEqual(second_outbound['event_id'], expected)
         self.assertEqual(
             first_result,
-            {
-                'webhook_delivery_status': 'DELIVERED',
-                'http_status': 200,
-            },
+            {'webhook_delivery_status': 'DELIVERED', 'http_status': 200},
         )
         self.assertEqual(second_result, first_result)
 
-    def test_notification_reuses_persisted_notification_id(self):
+    def test_notification_uses_job_id_even_with_legacy_payload_id(self):
         job = Job.objects.create(
             user=self.user,
             job_type=Job.JobType.SEND_NOTIFICATION,
@@ -496,35 +514,26 @@ class ExternalIdempotencyTests(TestCase):
             },
         )
 
-        first_key = get_external_operation_id(job)
-
+        expected = f'notification:{job.id}'
         with patch('apps.worker.handlers.time.sleep'), patch(
             'apps.worker.handlers.random.random',
             return_value=1.0,
-        ):
+        ), patch('apps.worker.handlers.logger.info') as log_info:
             first_result = dispatch_job(job)
+            first_outbound_id = log_info.call_args.args[3]
             second_result = dispatch_job(job)
+            second_outbound_id = log_info.call_args.args[3]
 
-        second_key = get_external_operation_id(job)
-
-        self.assertEqual(
-            first_key,
-            'notification:refund.completed:source-123',
-        )
-        self.assertEqual(
-            second_key,
-            'notification:refund.completed:source-123',
-        )
+        self.assertEqual(get_external_operation_id(job), expected)
+        self.assertEqual(first_outbound_id, expected)
+        self.assertEqual(second_outbound_id, expected)
         self.assertEqual(
             first_result,
-            {
-                'notification_status': 'SENT',
-                'channel': 'email',
-            },
+            {'notification_status': 'SENT', 'channel': 'email'},
         )
         self.assertEqual(second_result, first_result)
 
-    def test_fallback_external_ids_are_derived_from_job_id(self):
+    def test_external_ids_are_derived_from_job_id_without_payload_ids(self):
         webhook = Job.objects.create(
             user=self.user,
             job_type=Job.JobType.WEBHOOK_DELIVERY,
