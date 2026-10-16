@@ -50,6 +50,12 @@ def requeue_dead_letter_job(dlq_entry, redis_client=None):
         if job.status != Job.Status.DEAD:
             raise ValidationError('Only DEAD jobs can be manually requeued.')
 
+        # A previously deleted DLQ ID cannot requeue a later DEAD attempt.
+        if not DeadLetterQueue.objects.filter(
+            pk=dlq_entry.pk, original_job_id=job.pk,
+        ).exists():
+            raise ValidationError('DLQ entry is no longer active.')
+
         # A requeued refund produces a *new* terminal event. Retrying a DEAD
         # webhook/notification instead repeats the same existing event.
         if job.job_type == Job.JobType.REFUND_PROCESSING:
@@ -72,6 +78,8 @@ def requeue_dead_letter_job(dlq_entry, redis_client=None):
             )
         )
         record_job_history(job, message='Requeued from dead-letter queue.')
+        # Keep the DLQ restricted to currently DEAD jobs; retain audit in history.
+        DeadLetterQueue.objects.filter(pk=dlq_entry.pk).delete()
 
     queue_score = enqueue_job(job, redis_client=redis_client)
 

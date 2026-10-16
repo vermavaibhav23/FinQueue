@@ -1,9 +1,10 @@
 from django.contrib.auth.models import User
+from django.db import IntegrityError, transaction
 from django.test import TestCase
 from rest_framework.exceptions import ValidationError
 
 from apps.dlq.models import DeadLetterQueue
-from apps.dlq.services import requeue_dead_letter_job
+from apps.dlq.services import move_to_dead_letter_queue, requeue_dead_letter_job
 from apps.jobs.models import Job, JobHistory
 
 
@@ -41,6 +42,7 @@ class DeadLetterQueueTests(TestCase):
         self.assertEqual(requeued_job.retry_count, 0)
         self.assertEqual(requeued_job.processing_round, 2)
         self.assertIsNone(requeued_job.failure_reason)
+        self.assertFalse(DeadLetterQueue.objects.filter(original_job=job).exists())
 
         history = JobHistory.objects.filter(job=job).latest('created_at')
         self.assertEqual(history.status, Job.Status.PENDING)
@@ -68,6 +70,7 @@ class DeadLetterQueueTests(TestCase):
         job.refresh_from_db()
         self.assertEqual(job.processing_round, 2)
         self.assertEqual(job.status, Job.Status.PENDING)
+        self.assertFalse(DeadLetterQueue.objects.filter(pk=dlq.pk).exists())
 
     def test_requeue_of_dead_webhook_reuses_existing_event_round(self):
         user = User.objects.create_user(username='retry-dead-webhook')
@@ -100,3 +103,58 @@ class DeadLetterQueueTests(TestCase):
         self.assertEqual(job.processing_round, 2)
         self.assertEqual(job.payload['event_id'], event_id)
         self.assertEqual(job.status, Job.Status.PENDING)
+        self.assertFalse(DeadLetterQueue.objects.filter(pk=dlq.pk).exists())
+
+    def test_requeue_then_second_failure_creates_new_single_dlq_row(self):
+        user = User.objects.create_user(username='second-failure')
+        job = Job.objects.create(
+            user=user, job_type=Job.JobType.SEND_NOTIFICATION,
+            priority=Job.Priority.LOW, status=Job.Status.DEAD,
+            retry_count=3, payload={'channel': 'email'},
+            failure_reason='first failure',
+        )
+        first = DeadLetterQueue.objects.create(
+            original_job=job, job_type=job.job_type, payload=job.payload,
+            failure_reason='first failure', retry_attempts=3,
+        )
+        requeue_dead_letter_job(first, redis_client=FakeRedis())
+        self.assertFalse(DeadLetterQueue.objects.filter(original_job=job).exists())
+
+        job.refresh_from_db()
+        job.status = Job.Status.RUNNING
+        job.retry_count = 3
+        job.save(update_fields=('status', 'retry_count', 'updated_at'))
+        second, follow_ups = move_to_dead_letter_queue(job, 'second failure')
+        self.assertNotEqual(first.pk, second.pk)
+        self.assertEqual(follow_ups, [])
+        self.assertEqual(DeadLetterQueue.objects.filter(original_job=job).count(), 1)
+        self.assertEqual(
+            list(JobHistory.objects.filter(job=job).order_by('created_at')
+                 .values_list('status', flat=True)),
+            [Job.Status.PENDING, Job.Status.DEAD],
+        )
+
+        # A stale reference must not requeue the new DEAD attempt.
+        with self.assertRaises(ValidationError):
+            requeue_dead_letter_job(first, redis_client=FakeRedis())
+        job.refresh_from_db()
+        self.assertEqual(job.status, Job.Status.DEAD)
+        self.assertTrue(DeadLetterQueue.objects.filter(pk=second.pk).exists())
+
+    def test_one_active_dlq_entry_per_job_enforced_by_database(self):
+        user = User.objects.create_user(username='unique-active-dlq')
+        job = Job.objects.create(
+            user=user, job_type=Job.JobType.SEND_NOTIFICATION,
+            priority=Job.Priority.LOW, status=Job.Status.DEAD,
+            payload={'channel': 'email'},
+        )
+        DeadLetterQueue.objects.create(
+            original_job=job, job_type=job.job_type, payload=job.payload,
+            failure_reason='first failure', retry_attempts=3,
+        )
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                DeadLetterQueue.objects.create(
+                    original_job=job, job_type=job.job_type, payload=job.payload,
+                    failure_reason='duplicate', retry_attempts=3,
+                )

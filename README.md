@@ -27,7 +27,7 @@ The active design intentionally keeps persistence small:
 
 - `jobs` — current asynchronous job state plus Layer 1 submission idempotency metadata
 - `job_history` — append-only business/audit history of important job status changes
-- `dead_letter_queue` — jobs that exhausted retries
+- `dead_letter_queue` — currently DEAD jobs awaiting manual requeue
 
 The old `transactions` model/table was removed because it duplicated information
 already available in the job workflow and was not used by the current handlers.
@@ -178,6 +178,9 @@ preserved rather than reset.
 Manually requeueing a failed webhook or notification **does not** increment
 its processing round: it is a retry of the same event, not a new refund
 outcome. Requeueing is allowed only for jobs currently marked `DEAD`.
+The job reset, its JobHistory record, and deletion of the active DLQ entry
+are atomic in MySQL. History remains in JobHistory. A later terminal failure
+creates a new DLQ entry for that job.
 
 For a refund terminal transition, the terminal Job update, its JobHistory row,
 and the follow-up Job rows are written in the same MySQL transaction. For a

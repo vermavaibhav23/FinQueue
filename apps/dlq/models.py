@@ -4,10 +4,10 @@ from apps.jobs.models import Job
 
 
 class DeadLetterQueue(models.Model):
-    original_job = models.ForeignKey(
+    original_job = models.OneToOneField(
         Job,
         on_delete=models.CASCADE,
-        related_name='dead_letter_entries',
+        related_name='dead_letter_entry',
     )
     job_type = models.CharField(max_length=32)
     payload = models.JSONField()
@@ -20,7 +20,6 @@ class DeadLetterQueue(models.Model):
         ordering = ('-died_at',)
         indexes = [
             models.Index(fields=('job_type', 'died_at')),
-            models.Index(fields=('original_job',)),
         ]
 
     def __str__(self):
