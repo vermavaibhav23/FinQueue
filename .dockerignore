@@ -1,0 +1,11 @@
+.git
+.github
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+docker/.env
+*.sqlite3
+staticfiles/
+node_modules/
