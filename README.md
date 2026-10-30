@@ -1,5 +1,9 @@
 # FinQueue
 
+FinQueue now includes a React + JavaScript dashboard for local use. See
+[RUNNING.md](RUNNING.md) to start the Django API, MySQL, Redis, workers, and
+frontend on localhost.
+
 FinQueue is an asynchronous job-processing simulation built with Django,
 Django REST Framework, MySQL, and Redis.
 
@@ -424,3 +428,4 @@ signatures, real provider integrations that honor the stable idempotency IDs,
 and richer merchant/customer models. A lease + heartbeat worker-ownership
 mechanism is also a future enhancement beyond the current fixed 30-second
 stale threshold.
+
