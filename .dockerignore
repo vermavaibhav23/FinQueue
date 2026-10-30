@@ -5,6 +5,7 @@ __pycache__/
 .venv/
 venv/
 .env
+.env.oracle
 docker/.env
 *.sqlite3
 staticfiles/
