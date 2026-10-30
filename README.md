@@ -424,3 +424,7 @@ signatures, real provider integrations that honor the stable idempotency IDs,
 and richer merchant/customer models. A lease + heartbeat worker-ownership
 mechanism is also a future enhancement beyond the current fixed 30-second
 stale threshold.
+
+## Deployment
+
+See [DEPLOYMENT.md](DEPLOYMENT.md) for the Oracle Always Free VM setup. This application requires separate API, worker, and recovery services plus MySQL and Redis. The repository currently contains the Django API; a React frontend has not yet been added.

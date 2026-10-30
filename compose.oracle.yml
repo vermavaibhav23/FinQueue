@@ -1,0 +1,83 @@
+x-finqueue-app: &finqueue-app
+  build: .
+  image: finqueue:local
+  environment:
+    DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY}
+    DJANGO_DEBUG: ${DJANGO_DEBUG}
+    DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS}
+    MYSQL_DATABASE: ${MYSQL_DATABASE}
+    MYSQL_USER: ${MYSQL_USER}
+    MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    MYSQL_HOST: db
+    MYSQL_PORT: 3306
+    REDIS_URL: redis://redis:6379/0
+  restart: unless-stopped
+  depends_on:
+    db:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+
+services:
+  db:
+    image: mysql:8.0
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  api:
+    <<: *finqueue-app
+    command: ["sh", "deploy/web.sh"]
+    expose:
+      - "8000"
+
+  worker:
+    <<: *finqueue-app
+    command: ["sh", "deploy/worker.sh"]
+
+  recovery:
+    <<: *finqueue-app
+    command: ["sh", "deploy/recovery.sh"]
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - api
+
+volumes:
+  mysql_data:
+  redis_data:
+  caddy_data:
+  caddy_config:

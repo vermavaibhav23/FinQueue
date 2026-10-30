@@ -1,0 +1,12 @@
+.git
+.github
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+.env.oracle
+docker/.env
+*.sqlite3
+staticfiles/
+node_modules/

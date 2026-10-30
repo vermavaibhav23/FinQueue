@@ -19,5 +19,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
+      - name: Validate Oracle Compose configuration
+        run: docker compose --env-file .env.oracle.example -f compose.oracle.yml config --quiet
       - name: Run Django tests on SQLite
         run: python manage.py test --settings=finqueue.test_settings
