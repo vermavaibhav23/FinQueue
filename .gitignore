@@ -1,0 +1,9 @@
+.env
+.env.oracle
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.sqlite3
+staticfiles/
+node_modules/
