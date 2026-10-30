@@ -427,4 +427,4 @@ stale threshold.
 
 ## Deployment
 
-See [DEPLOYMENT.md](DEPLOYMENT.md) for the Railway setup. This application requires separate API, worker, and recovery services plus MySQL and Redis. The repository currently contains the Django API; a React frontend has not yet been added.
+See [DEPLOYMENT.md](DEPLOYMENT.md) for the Oracle Always Free VM setup. This application requires separate API, worker, and recovery services plus MySQL and Redis. The repository currently contains the Django API; a React frontend has not yet been added.
