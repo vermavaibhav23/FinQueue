@@ -1,7 +1,16 @@
 x-finqueue-app: &finqueue-app
   build: .
   image: finqueue:local
-  env_file: .env.oracle
+  environment:
+    DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY}
+    DJANGO_DEBUG: ${DJANGO_DEBUG}
+    DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS}
+    MYSQL_DATABASE: ${MYSQL_DATABASE}
+    MYSQL_USER: ${MYSQL_USER}
+    MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    MYSQL_HOST: db
+    MYSQL_PORT: 3306
+    REDIS_URL: redis://redis:6379/0
   restart: unless-stopped
   depends_on:
     db:
