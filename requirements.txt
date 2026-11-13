@@ -4,3 +4,6 @@ djangorestframework-simplejwt==5.5.1
 mysqlclient==2.2.7
 redis==5.2.1
 django-redis==5.4.0
+gunicorn==23.0.0
+whitenoise==6.9.0
+django-cors-headers==4.7.0
