@@ -162,7 +162,7 @@ these fields `NULL`. An idempotent replay returns `200 OK` with
 `"idempotent_replay": true`.
 
 This is separate from follow-up idempotency, which uses
-`UNIQUE(source_job, processing_round, job_type, source_event)`. 
+`UNIQUE(source_job, processing_round, job_type)`.
 
 ### External side-effect idempotency
 
@@ -188,7 +188,7 @@ send_notification   priority=low       success message
 ```
 
 Both follow-up jobs have `source_job` set to the original refund job and
-`source_event` set to `refund.completed`.
+`processing_round` set to the refund's current round.
 
 Example generated webhook payload:
 
@@ -274,8 +274,7 @@ send_notification   priority=low       failure message
 
 The failed webhook contains the final `failure_reason`.
 
-Follow-up creation is idempotent per terminal event: at most one webhook and
-one notification job are created for each `source_job + processing_round + source_event` combination.
+Each refund can create at most one webhook and one notification per processing round.
 
 ## Direct webhook/notification submission
 
@@ -369,8 +368,7 @@ GET {{base_url}}/jobs/{{job_id}}/
 Authorization: Bearer {{access_token}}
 ```
 
-Follow-up jobs include the original refund UUID in `source_job`, the
-triggering terminal event in `source_event`, and the refund's `processing_round`.
+Follow-up jobs include the original refund UUID in `source_job` and the refund's `processing_round`.
 
 Example completed refund:
 

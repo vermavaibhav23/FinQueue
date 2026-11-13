@@ -35,7 +35,6 @@ class Job(models.Model):
         blank=True,
         related_name='follow_up_jobs',
     )
-    source_event = models.CharField(max_length=64, null=True, blank=True)
     # Incremented on each manual requeue of a DEAD refund; follow-ups inherit it.
     processing_round = models.PositiveIntegerField(default=1)
     job_type = models.CharField(max_length=32, choices=JobType.choices)
@@ -78,8 +77,8 @@ class Job(models.Model):
                 name='unique_job_user_idempotency_key',
             ),
             models.UniqueConstraint(
-                fields=('source_job', 'processing_round', 'job_type', 'source_event'),
-                name='unique_follow_up_source_round_event',
+                fields=('source_job', 'processing_round', 'job_type'),
+                name='unique_follow_up_round_type',
             ),
         ]
 

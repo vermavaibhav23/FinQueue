@@ -343,8 +343,8 @@ class WorkerRetryTests(TestCase):
         self.assertEqual(Job.objects.filter(source_job=job).count(), 4)
         round_two = Job.objects.filter(source_job=job, processing_round=2)
         self.assertEqual(
-            set(round_two.values_list('source_event', flat=True)),
-            {'refund.completed'},
+            round_two.get(job_type=Job.JobType.WEBHOOK_DELIVERY).payload['event'],
+            'refund.completed',
         )
         round_one_ids = {
             get_external_operation_id(item)

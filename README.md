@@ -63,7 +63,7 @@ FinQueue now demonstrates all three idempotency layers discussed in the design:
    Internally generated follow-up jobs leave these fields `NULL`.
 2. **Follow-up job creation idempotency** — internally generated webhook and
    notification jobs are protected by
-   `UNIQUE(source_job, processing_round, job_type, source_event)`.
+   `UNIQUE(source_job, processing_round, job_type)`.
    A new refund starts at round 1, and each manual DLQ requeue increments its
    round. Automatic worker retries do not advance the round.
 3. **External side-effect idempotency** — every retry of the same logical
@@ -167,10 +167,8 @@ When a refund exhausts all retries and becomes `dead`:
 The refund status is never rolled back because a webhook or notification later
 fails.
 
-Follow-up jobs store `source_job`, `source_event`, and `processing_round`
-(for example, `refund.failed` in round 1 or 2). A database uniqueness
-constraint allows at most one webhook and one notification per event **per
-round**. A refund manually requeued from the DLQ advances to the next round,
+The database allows at most one webhook and one notification per refund per
+processing round. A refund manually requeued from the DLQ advances to the next round,
 so a second `refund.failed` (or a later `refund.completed`) creates new
 follow-up jobs with their own UUID-based external IDs. Previously completed follow-ups are
 preserved rather than reset.

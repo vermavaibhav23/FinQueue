@@ -89,7 +89,6 @@ class DeadLetterQueueTests(TestCase):
             priority=Job.Priority.MEDIUM,
             status=Job.Status.DEAD,
             source_job=parent,
-            source_event='refund.completed',
             processing_round=2,
             payload={'event': 'refund.completed', 'event_id': event_id},
         )

@@ -134,9 +134,6 @@ def create_refund_follow_up_jobs(refund_job):
             f"{payload.get('currency', 'INR')} could not be processed."
         )
 
-    # L3 external IDs come from the new follow-up jobs' UUIDs, not the
-    # parent refund, event, or round. L2 still uses those fields to dedupe.
-
     event_data = {
         'source_job_id': str(refund_job.id),
         'processing_round': refund_job.processing_round,
@@ -177,7 +174,6 @@ def create_refund_follow_up_jobs(refund_job):
         follow_up_job, created = Job.objects.get_or_create(
             source_job=refund_job,
             processing_round=refund_job.processing_round,
-            source_event=event,
             job_type=job_type,
             defaults={
                 'user': refund_job.user,
