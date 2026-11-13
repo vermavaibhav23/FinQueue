@@ -13,6 +13,19 @@ class RegisterView(generics.CreateAPIView):
     permission_classes = (AllowAny,)
 
 
+class CurrentUserView(APIView):
+    permission_classes = (IsAuthenticated,)
+
+    def get(self, request):
+        user = request.user
+        return Response({
+            'id': user.id,
+            'username': user.username,
+            'email': user.email,
+            'is_staff': user.is_staff,
+        })
+
+
 class LogoutView(APIView):
     permission_classes = (AllowAny,)
 
@@ -38,3 +51,4 @@ class LogoutView(APIView):
             {'detail': 'Logged out successfully.'},
             status=status.HTTP_205_RESET_CONTENT,
         )
+

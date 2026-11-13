@@ -1,0 +1,9 @@
+.npm-cache/
+.env
+.venv/
+__pycache__/
+*.py[cod]
+staticfiles/
+frontend/node_modules/
+frontend/dist/
+
